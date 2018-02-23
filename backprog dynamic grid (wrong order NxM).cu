@@ -7,9 +7,9 @@
 #define blockSide 16
 #define blockNum 12
 #define epsilon 1e-5
-#define N 58
+#define N 580
 #define M 784
-#define P 20000
+#define P 680
 #define DATA float
 /*     OCCHIO IL PROBLEMA C'è AL CAMBIO GRIGLIA . I BLOCCHI DA GRID 0 A GRID 1 E COSì VIA TENGONO IN MEMORIA DEGLI ELEMENTI         */
 

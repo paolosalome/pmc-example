@@ -7,13 +7,13 @@
 #define blockSide 16
 #define blockNum 12
 #define epsilon 1e-5
-#define N 58
-#define M 784
-#define P 20000
+#define N 210
+#define M 69
+#define P 680
 #define DATA float
 /*     OCCHIO IL PROBLEMA C'è AL CAMBIO GRIGLIA . I BLOCCHI DA GRID 0 A GRID 1 E COSì VIA TENGONO IN MEMORIA DEGLI ELEMENTI         */
 
-
+/* la matrice di destinazione è col1 x col2     */
 /* IMPORTANTE è meglio fissare la dimensione a 16*16*16 ed in caso si sforino le matrici si setta 0 */
 /* a_corner,b_corner  sono in previsione di una "sliding grid" */
 __device__ void matrix_array_block(DATA* block_src_A, DATA* block_B, DATA* dest,int col1,int col2, int A_right_limit, int B_right_limit){
@@ -24,8 +24,8 @@ __device__ void matrix_array_block(DATA* block_src_A, DATA* block_B, DATA* dest,
     int idx = t_x + block_x ; 
     int idy = t_y + block_y ;
     int pattern;
-    int a_corner = blockIdx.x*blockSide;
-    int b_corner = blockIdx.y*blockSide;
+    int a_corner = blockIdx.y*blockSide;
+    int b_corner = blockIdx.x*blockSide;
   
 
     __shared__ DATA temp_shifted_mul[blockSide][blockSide*blockSide];//può contenere diversi 0 nei casi sui bordi
@@ -45,11 +45,11 @@ __device__ void matrix_array_block(DATA* block_src_A, DATA* block_B, DATA* dest,
 
         //printf("t[%d][%d]->val:%f,(corner %d) [pattern:%d]+ block_B[t_x*col2 + t_y]:%f\n",idy,idx,val,a_corner,pattern,block_B[t_y*col2 + t_x]);
         for(int i=0 ;i<blockSide;i++)
-            temp_shifted_mul[t_y][ t_x*blockSide + i ] =  ( (curr_patterns+ t_y) < P && max_a_x > i) ? val*block_src_A[t_y*col1 + i +curr_patterns*col1]:0.0f;
+            temp_shifted_mul[t_y][ t_x + i*blockSide ] =  ( (curr_patterns+ t_y) < P && max_a_x > i) ? val*block_src_A[t_y*col1 + i +curr_patterns*col1]:0.0f;
         __syncthreads();
         //il problema è qua con block
         if(t_y==0){
-            for(int j=t_x*blockSide,index=0; index<blockSide;j+=1, index++ ){//j<blockSide*blockSide
+            for(int j=t_x,index=0; index<blockSide;j+=blockSide, index++ ){//j<blockSide*blockSide
                 //int temp_sum=0;
                 for(int i=0 ;i<pattern;i++){
                     block_arr_A[j] += temp_shifted_mul[i][j];
@@ -61,9 +61,9 @@ __device__ void matrix_array_block(DATA* block_src_A, DATA* block_B, DATA* dest,
         __syncthreads();
 
     }
-    if(t_x + a_corner < A_right_limit && t_y + b_corner < B_right_limit){//qui i pattern non c'etrano più nulla NON METTERE ALCUN CONTROLLO
+    if(t_y + a_corner < A_right_limit && t_x + b_corner < B_right_limit){//qui i pattern non c'etrano più nulla NON METTERE ALCUN CONTROLLO
         // printf("t[%d][%d]->block_arr[%d]:%f\n",idy,idx,t_y*blockSide+ t_x,block_arr_A[t_y*blockSide+ t_x]);
-        dest[t_x+t_y*col1] = block_arr_A[t_y*blockSide+ t_x];
+        dest[t_x+t_y*col2] = block_arr_A[t_y*blockSide+ t_x];
     }
 
 }
@@ -78,12 +78,12 @@ __global__ void matrix_mul(DATA* A,DATA* B, DATA* DEST,int col1,int col2, int A_
     int b_x = blockIdx.x*blockSide;
     int b_y = blockIdx.y*blockSide;
 
-    matrix_array_block(A+b_x, B+b_y, DEST+b_x+b_y*col1, col1, col2, A_right_limit, B_right_limit);
+    matrix_array_block(A+b_y, B+b_x, DEST+b_x+b_y*col2, col1, col2, A_right_limit, B_right_limit);
     __syncthreads();
 }
 void optimum_grid_x(dim3* grid,int max_block,int y_limit){
     
-    int x = min((M+blockSide-1)/blockSide,max_block);
+    int x = min((N+blockSide-1)/blockSide,max_block);
     int y=max_block/x;
     int prod=x*y;
     int new_prod;
@@ -106,13 +106,16 @@ void backward(DATA *host_A, DATA* host_B, DATA* host_DEST,DATA* d_a,DATA* d_b, D
     dim3 grid,block;
     /* grid.x = (M+blockSide-1)/blockSide;
     grid.y= blockNum/grid.x;  */
-    optimum_grid_x(&grid,blockNum,col2/blockSide);
+    optimum_grid_x(&grid,blockNum,col1/blockSide);
     block.x= blockSide;
     block.y= blockSide;
     printf("grid :%d %d\n",grid.y,grid.x);
-    for(int sw_x=0; sw_x < col1; sw_x += grid.x*blockSide)
-        for(int sw_y=0; sw_y < col2;sw_y += grid.y*blockSide) 
-            matrix_mul<<< grid,block >>>(d_a,d_b,d_c+sw_x+sw_y*col1,col1,col2,min(col1-sw_x,grid.x*blockSide),min(col2-sw_y,grid.y*blockSide));
+    
+    for(int sw_x=0; sw_x < col2; sw_x += grid.x*blockSide)
+        for(int sw_y=0; sw_y < col1;sw_y += grid.y*blockSide) {
+            matrix_mul<<< grid,block >>>(d_a,d_b,d_c+sw_x+sw_y*col2,col1,col2,min(col1-sw_y,grid.y*blockSide),min(col2-sw_x,grid.x*blockSide));
+            printf("grid :%d %d\n",sw_y,sw_x);
+        }
 
 
 }
@@ -170,15 +173,15 @@ int main(){
     for(int row=0;row<P;row++){
         for(int colb=0;colb<N;colb++)
             for(int cola=0;cola<M;cola++)
-                c_host[colb*M+cola]+= a[row*M+cola]* b[row*N+colb];      
+                c_host[cola*N+colb]+= a[row*M+cola]* b[row*N+colb];      
     }
     cudaMemcpy(dest_c,d_c,N*M*sizeof(DATA),cudaMemcpyDeviceToHost);
 
    // printMat(c_host,N,M);
     printf("------------------------------\n");
-    //printMat(dest_c,N,M);
+    //printMat(dest_c,M,N);
     printf("------------------------------\n");
-    matsAreEquals(dest_c,c_host,N,M);
+    matsAreEquals(dest_c,c_host,M,N);
     
 
     free(a);

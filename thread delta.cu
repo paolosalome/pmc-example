@@ -37,14 +37,13 @@ void stopAndPrint(cudaEvent_t *start, cudaEvent_t *stop) {
 	HANDLE_CUDA(cudaEventDestroy(*stop));
 }
 
-/* __inline__ __device__ DATA warpGetVal(DATA val, int offset) {
+__inline__ __device__ DATA warpGetVal(DATA val, int offset) {
     return __shfl(val, offset);
 }
- */
+
 /* la matrice di destinazione è col1 x col2     */
 /* a_corner,b_corner  sono in previsione di una "sliding grid" */
-
-__device__ void matrix_array_block(DATA* h2h, DATA* w, DATA* delta, DATA* thr_delta, DATA* dest_delta, int col1, int col2, int A_right_limit, int B_right_limit){
+__device__ void matrix_array_block(DATA* block_src_A, DATA* block_B, DATA* dest,int col1,int col2, int A_right_limit, int B_right_limit){
     int t_x = threadIdx.x;
     int t_y = threadIdx.y;
  /*    int block_x = blockIdx.x*blockSide;
@@ -67,9 +66,9 @@ __device__ void matrix_array_block(DATA* h2h, DATA* w, DATA* delta, DATA* thr_de
         int max_b_x = ((b_corner + blockSide) < B_right_limit) ? blockSide: (B_right_limit - b_corner);
         int max_a_x = ((a_corner + blockSide) < A_right_limit) ? blockSide: (A_right_limit - a_corner);
 
-        DATA val = ((curr_patterns+ t_y) < P && max_b_x > t_x) ? delta[t_y*col2 + t_x + curr_patterns*col2]:0.0f;
-        //DATA val_ai= ((curr_patterns+ t_y) < P && max_a_x > t_x) ? h2h[t_y*col1 + t_x +curr_patterns*col1]:0.0f;
-        //block_A[t_y*blockSide+t_x]= ((curr_patterns+ t_y) < P && max_a_x > t_x) ? h2h[t_y*col1 + t_x +curr_patterns*col1]:0.0f;
+        DATA val = ((curr_patterns+ t_y) < P && max_b_x > t_x) ? block_B[t_y*col2 + t_x + curr_patterns*col2]:0.0f;
+        //DATA val_ai= ((curr_patterns+ t_y) < P && max_a_x > t_x) ? block_src_A[t_y*col1 + t_x +curr_patterns*col1]:0.0f;
+        //block_A[t_y*blockSide+t_x]= ((curr_patterns+ t_y) < P && max_a_x > t_x) ? block_src_A[t_y*col1 + t_x +curr_patterns*col1]:0.0f;
         
         for(int i=0 ;i<blockSide;i++){
            /*  if(t_y%2==0)//utile a spezzare il warp
@@ -78,7 +77,7 @@ __device__ void matrix_array_block(DATA* h2h, DATA* w, DATA* delta, DATA* thr_de
                 temp_shifted_mul[t_y][ t_x + i*blockSide ] =  val*warpGetVal(val_ai,16+i);
          */
            // temp_shifted_mul[t_y][ t_x + i*blockSide ] =  val*block_A[t_y*blockSide+i];
-           temp_shifted_mul[t_y][ t_x + i*blockSide ] =  ( (curr_patterns+ t_y) < P && max_a_x > i) ? val*h2h[t_y*col1 + i +curr_patterns*col1]:0.0f;
+           temp_shifted_mul[t_y][ t_x + i*blockSide ] =  ( (curr_patterns+ t_y) < P && max_a_x > i) ? val*block_src_A[t_y*col1 + i +curr_patterns*col1]:0.0f;
         }    
         __syncthreads();
         
@@ -92,15 +91,15 @@ __device__ void matrix_array_block(DATA* h2h, DATA* w, DATA* delta, DATA* thr_de
 
     }
     if(t_y + a_corner < A_right_limit && t_x + b_corner < B_right_limit)
-        thr_delta[t_x+t_y*col2] = block_arr_A[t_y*blockSide+ t_x];
+        dest[t_x+t_y*col2] = block_arr_A[t_y*blockSide+ t_x];
     
 }
-/* THR_DEST has nupl[L]*nupl[l+1] element*/
-__global__ void matrix_mul(DATA* H2H, DATA* W, DATA* DELTA, DATA* THR_DELTA, DATA* DEST_DELTA, int col1, int col2, int A_right_limit, int B_right_limit){
+
+__global__ void matrix_mul(DATA* A,DATA* B, DATA* DEST,int col1,int col2, int A_right_limit, int B_right_limit){
     int b_x = blockIdx.x*blockSide;
     int b_y = blockIdx.y*blockSide;
 
-    matrix_array_block(H2H +b_y, W +b_x+b_y*col2, DELTA +b_x, THR_DELTA +b_x+b_y*col2, DEST_DELTA, col1, col2, A_right_limit, B_right_limit);
+    matrix_array_block(A+b_y, B+b_x, DEST+b_x+b_y*col2, col1, col2, A_right_limit, B_right_limit);
     __syncthreads();
 }
 void optimum_grid_x(dim3* grid,int max_block,int y_limit){
@@ -123,7 +122,7 @@ void optimum_grid_x(dim3* grid,int max_block,int y_limit){
     grid->y = y;
 
 }
-void backward(DATA *host_h2h, DATA* host_delta, DATA* host_thread_delta, DATA* d_h2h, DATA* d_w, DATA* d_delta, DATA* d_thread_delta, DATA* d_dest_delta, int col1, int col2){
+void backward(DATA *host_A, DATA* host_B, DATA* host_DEST,DATA* d_a,DATA* d_b, DATA* d_c, int col1, int col2){
     dim3 grid,block;
     optimum_grid_x(&grid,blockNum,col1/blockSide);
     block.x= blockSide;
@@ -133,7 +132,7 @@ void backward(DATA *host_h2h, DATA* host_delta, DATA* host_thread_delta, DATA* d
     startTimer(&start,&stop);
     for(int sw_x=0; sw_x < col2; sw_x += grid.x*blockSide)
         for(int sw_y=0; sw_y < col1;sw_y += grid.y*blockSide) {
-            matrix_mul<<< grid,block >>>(d_h2h +sw_y, d_w +sw_x+sw_y*col2, d_delta +sw_x, d_thread_delta+sw_x+sw_y*col2, d_dest_delta, col1, col2, min(col1-sw_y,grid.y*blockSide) ,min(col2-sw_x,grid.x*blockSide));
+            matrix_mul<<< grid,block >>>(d_a+sw_y,d_b+sw_x,d_c+sw_x+sw_y*col2,col1,col2,min(col1-sw_y,grid.y*blockSide),min(col2-sw_x,grid.x*blockSide));
             //printf("grid :%d %d----limits:%d %d\n",sw_y,sw_x,min(col1-sw_y,grid.y*blockSide),min(col2-sw_x,grid.x*blockSide));
         }
     stopAndPrint(&start,&stop);
@@ -167,56 +166,35 @@ void printMat(DATA *mat, int rows, int cols) {
 }
 
 int main(){
-    DATA *h2h, *w, *delta, *c_host,*dest_c, *new_delta, *delta_host;
-    DATA *d_h2h, *d_w, *d_delta, *d_thread_delta, *d_dest_delta;
+    DATA *a, *b, *c_host,*dest_c;
+    DATA *d_a, *d_b, *d_c;
 
-    h2h=(DATA *)malloc(P*M*sizeof(DATA));
-    w=(DATA *)malloc(M*N,sizeof(DATA));
-    delta=(DATA *)malloc(P*N*sizeof(DATA));
-    new_delta=(DATA *)calloc(P*M*sizeof(DATA));
-    delta_host=(DATA *)calloc(P*M*sizeof(DATA));
-    c_host=(DATA *)calloc(M*N,sizeof(DATA));
-    dest_c=(DATA *)calloc(M*N,sizeof(DATA));
+    a=(DATA *)malloc(P*M*sizeof(DATA));
+    b=(DATA *)malloc(P*N*sizeof(DATA));
+    c_host=(DATA *)calloc(N*M,sizeof(DATA));
+    dest_c=(DATA *)calloc(N*M,sizeof(DATA));
 
-    cudaMalloc((void**)&d_h2h,P*M*sizeof(DATA));
-    cudaMalloc((void**)&d_w,M*N*sizeof(DATA));
-    cudaMalloc((void**)&d_delta,P*N*sizeof(DATA));
-    cudaMalloc((void**)&d_dest_delta,P*M*sizeof(DATA));
-    cudaMalloc((void**)&d_thread_delta,M*N*sizeof(DATA));
-/* -------------------------------init  -------------------*/
+    cudaMalloc((void**)&d_a,P*M*sizeof(DATA));
+    cudaMalloc((void**)&d_b,P*N*sizeof(DATA));
+    cudaMalloc((void**)&d_c,N*M*sizeof(DATA));
+
     for(int row=0;row<P;row++){
         for(int cola=0;cola<M;cola++)
-            h2h[row*M+cola]=(DATA)rand() / (DATA)RAND_MAX;//1.0f;
+            a[row*M+cola]=(DATA)rand() / (DATA)RAND_MAX;//1.0f;
         for(int colb=0;colb<N;colb++)
-            delta[row*N+colb]=(DATA)rand() / (DATA)RAND_MAX;      
+            b[row*N+colb]=(DATA)rand() / (DATA)RAND_MAX;      
     }
-    for(int cola=0;cola<M;cola++)
-        for(int colb=0;colb<N;colb++)
-            w[cola*N+colb]=(DATA)rand() / (DATA)RAND_MAX;//1.0f;
-/*  -------------------------------------   */
-    cudaMemcpy(d_h2h,h2h,P*M*sizeof(DATA),cudaMemcpyHostToDevice);
-    cudaMemcpy(d_w,w,P*M*sizeof(DATA),cudaMemcpyHostToDevice);
-    cudaMemcpy(d_delta,delta,P*N*sizeof(DATA),cudaMemcpyHostToDevice);
-    cudaMemcpy(d_thread_delta,c_host,N*M*sizeof(DATA),cudaMemcpyHostToDevice);
-
-    backward(h2h, delta, dest_c, d_h2h, d_w, d_delta, d_thread_delta, d_dest_delta, M, N);
+    cudaMemcpy(d_a,a,P*M*sizeof(DATA),cudaMemcpyHostToDevice);
+    cudaMemcpy(d_b,b,P*N*sizeof(DATA),cudaMemcpyHostToDevice);
+    cudaMemcpy(d_c,c_host,N*M*sizeof(DATA),cudaMemcpyHostToDevice);
+    backward(a, b, dest_c, d_a , d_b, d_c, M, N);
     
-    for(int row=0;row<P;row++){
-        for(int cola=0;cola<M;cola++){
-            DATA temp= 0.0f;
-            for(int colb=0;colb<N;colb++)
-                temp+= delta[row*N+colb]*w[cola*N+colb];    
-            delta_host[row*M+cola] = temp*h2h[row*M+cola]*(1-h2h[row*M+cola]);
-        }
-    }
-
     for(int row=0;row<P;row++){
         for(int colb=0;colb<N;colb++)
             for(int cola=0;cola<M;cola++)
-                c_host[cola*N+colb]+= h2h[row*M+cola]* delta[row*N+colb];      
+                c_host[cola*N+colb]+= a[row*M+cola]* b[row*N+colb];      
     }
-
-    cudaMemcpy(dest_c,d_thread_delta,M*N*sizeof(DATA),cudaMemcpyDeviceToHost);
+    cudaMemcpy(dest_c,d_c,N*M*sizeof(DATA),cudaMemcpyDeviceToHost);
 
     //printMat(c_host,M,N);
     printf("------------------------------\n");
@@ -225,16 +203,12 @@ int main(){
     matsAreEquals(dest_c,c_host,M,N);
     
 
-    free(h2h);
-    free(w);
-    free(delta);
-    free(delta_host);
+    free(a);
+    free(b);
     free(c_host);
     free(dest_c);
-    cudaFree(d_h2h);
-    cudaFree(d_w);
-    cudaFree(d_delta);
-    cudaFree(d_thread_delta);
-    cudaFree(d_dest_delta);
+    cudaFree(d_a);
+    cudaFree(d_b);
+    cudaFree(d_c);
     return 0;
 }
