@@ -6,11 +6,12 @@
 #define BOOL int
 #define blockSide 16
 #define blockNum 16
-#define epsilon 1e-4
+#define epsilon 1e-5
 #define N 10
 #define M 28
 #define P 20000
 #define DATA float
+#define eta 0.5f
 
 
 static void HandleCuda(cudaError_t err, const char *file, int line) {
@@ -40,8 +41,7 @@ void stopAndPrint(cudaEvent_t *start, cudaEvent_t *stop) {
 
 /* la matrice di destinazione è width_h2h x width_delta     */
 /* h2h_corner,delta_corner  sono in previsione di una "sliding grid" */
-
-__device__ void matrix_array_block(DATA* h2h, DATA* w, DATA* delta, DATA* thr_delta, DATA* dest_delta, int width_h2h, int width_delta, int A_right_limit, int B_right_limit){
+__device__ void matrix_array_block(DATA* h2h, DATA* w,  DATA* d_delta_weight, DATA* d_delta_bias, DATA* delta, DATA* thr_delta, DATA* dest_delta, DATA* d_delta_weight_dest, DATA* d_delta_bias_dest, int width_h2h, int width_delta, int A_right_limit, int B_right_limit){
     int t_x = threadIdx.x;
     int t_y = threadIdx.y;
     int idx = t_x + blockIdx.x*blockSide ; 
@@ -65,12 +65,13 @@ __device__ void matrix_array_block(DATA* h2h, DATA* w, DATA* delta, DATA* thr_de
     for(int curr_patterns=0;curr_patterns<P;curr_patterns+=blockSide){
         pattern = (curr_patterns  + blockSide > P) ? (P-curr_patterns): blockSide ;
 
-        DATA val = ((curr_patterns+ t_y) < P && max_b_x > t_x) ? delta[t_y*width_delta + t_x + curr_patterns*width_delta]:0.0f;
+        //DATA val = ((curr_patterns+ t_y) < P && max_b_x > t_x) ? delta[t_y*width_delta + t_x + curr_patterns*width_delta]:0.0f;
 
         block_h2h[t_y*blockSide+t_x]= ((curr_patterns+ t_y) < P && max_a_x > t_x) ? h2h[t_y*width_h2h + t_x +curr_patterns*width_h2h]:0.0f;
         block_delta[t_y*blockSide+t_x] = ((curr_patterns+ t_y) < P && max_b_x > t_x) ? delta[t_y*width_delta + t_x + curr_patterns*width_delta]:0.0f;
         __syncthreads();
 
+        DATA val = block_delta[t_y*blockSide+t_x];
         DATA temp=0.0f;
         for(int i=0 ;i<blockSide;i++){
         /*  QUI CI VA IL PRODOTTO TRA TEMP=W*DELTA   */
@@ -85,22 +86,33 @@ __device__ void matrix_array_block(DATA* h2h, DATA* w, DATA* delta, DATA* thr_de
         if(t_y==0){
             for(int j=t_x,index=0; index<blockSide;j+=blockSide, index++ ){
                 for(int i=0 ;i<pattern;i++)
-                    temp_sum_delta_h2h[j] += temp_shifted_mul[i][j];
+                    temp_sum_delta_h2h[j] += eta*temp_shifted_mul[i][j];
             }
         }
         __syncthreads();
 
     }
     if(t_y + h2h_corner < A_right_limit && t_x + delta_corner < B_right_limit)
-        thr_delta[t_x+t_y*width_delta] = temp_sum_delta_h2h[t_y*blockSide+ t_x];
-    
+        thr_delta[t_x+t_y*width_delta] = temp_sum_delta_h2h[t_y*blockSide+ t_x];  /*+ alpha * deltaWeight[t_x+t_y*width_delta]
+                                                                da mettere nella riduzione delle matrici costruite tra i vari stream*/
+    /* IMPORTANTE : aggiungere la parte riguardante i delta bias, ossia 
+            deltaBias[L+1] = alpha*deltaWeight[0 +t_y*width_delta]+ somma p in P (delta[p][L+1])
+
+    */
 }
+/* si può la riduzione finale di W sommando i delta calcolati e riaggiornare quindi il delta W con gli stessi .
+ oppure si fa prima ma bisogna salvarlo a parte e non sovrascrivere subito la matrice di partenza (problemi di concorrenza con altri stream) 
+ la matrice di desinazione avrà streams*L*(L+1) elementi . si effettua la riduzione sullo stream principale per salvarla su quella giusta
+ */
+
+
 /* THR_DEST has nupl[L]*nupl[l+1] element*/
-__global__ void matrix_mul(DATA* H2H, DATA* W, DATA* DELTA, DATA* THR_DELTA, DATA* DEST_DELTA, int width_h2h, int width_delta, int A_right_limit, int B_right_limit){
+
+__global__ void matrix_mul(DATA* H2H, DATA* W, DATA* DELTA_WEIGHT, DATA* DELTA_BIAS, DATA* DELTA, DATA* THR_DELTA, DATA* DEST_DELTA,DATA* DELTA_WEIGHT_DEST, DATA* DELTA_BIAS_DEST, int width_h2h, int width_delta, int A_right_limit, int B_right_limit){
     int b_x = blockIdx.x*blockSide;
     int b_y = blockIdx.y*blockSide;
     if(b_x < B_right_limit && b_y <A_right_limit)
-        matrix_array_block(H2H +b_y, W +b_x+b_y*width_delta, DELTA +b_x, THR_DELTA +b_x+b_y*width_delta, DEST_DELTA+b_y, width_h2h, width_delta, A_right_limit, B_right_limit);
+        matrix_array_block(H2H +b_y, W +b_x+b_y*width_delta, DELTA_WEIGHT +b_x+b_y*width_delta, DELTA_BIAS +b_x, DELTA +b_x, THR_DELTA +b_x+b_y*width_delta, DEST_DELTA+b_y, DELTA_WEIGHT_DEST +b_x+b_y*width_delta, DELTA_BIAS_DEST +b_x, width_h2h, width_delta, A_right_limit, B_right_limit);
     __syncthreads();
 }
 void optimum_grid_x(dim3* grid,int max_block,int y_limit){
@@ -122,8 +134,8 @@ void optimum_grid_x(dim3* grid,int max_block,int y_limit){
     grid->x = x;
     grid->y = y;
 
-}
-void backward(DATA *host_h2h, DATA* host_delta, DATA* host_thread_delta, DATA* d_h2h, DATA* d_w, DATA* d_delta, DATA* d_thread_delta, DATA* d_dest_delta, int width_h2h, int width_delta){
+}                                                                    
+void backward(DATA *host_h2h, DATA* host_delta, DATA* host_thread_delta, DATA* d_h2h, DATA* d_w, DATA* d_delta_weight, DATA* d_delta_bias, DATA* d_delta, DATA* d_thread_delta, DATA* d_dest_delta, DATA* d_delta_weight_dest, DATA* d_delta_bias_dest, int width_h2h, int width_delta){
     dim3 grid,block;
     optimum_grid_x(&grid,blockNum,width_h2h/blockSide);
     block.x= blockSide;
@@ -132,8 +144,8 @@ void backward(DATA *host_h2h, DATA* host_delta, DATA* host_thread_delta, DATA* d
     cudaEvent_t start,stop;
     startTimer(&start,&stop);
     for(int sw_x=0; sw_x < width_delta; sw_x += grid.x*blockSide)
-        for(int sw_y=0; sw_y < width_h2h;sw_y += grid.y*blockSide) {
-            matrix_mul<<< grid,block >>>(d_h2h +sw_y, d_w +sw_x+sw_y*width_delta, d_delta +sw_x, d_thread_delta+sw_x+sw_y*width_delta, d_dest_delta + sw_y, width_h2h, width_delta, min(width_h2h-sw_y,grid.y*blockSide) ,min(width_delta-sw_x,grid.x*blockSide));
+        for(int sw_y=0; sw_y < width_h2h;sw_y += grid.y*blockSide) {                                            
+            matrix_mul<<< grid,block >>>(d_h2h +sw_y, d_w +sw_x+sw_y*width_delta, d_delta_weight +sw_x+sw_y*width_delta, d_delta_bias +sw_x, d_delta +sw_x, d_thread_delta+sw_x+sw_y*width_delta, d_dest_delta + sw_y, d_delta_weight_dest +sw_x+sw_y*width_delta, d_delta_bias_dest +sw_x, width_h2h, width_delta, min(width_h2h-sw_y,grid.y*blockSide) ,min(width_delta-sw_x,grid.x*blockSide));
             //printf("grid :%d %d----limits:%d %d\n",sw_y,sw_x,min(width_h2h-sw_y,grid.y*blockSide),min(width_delta-sw_x,grid.x*blockSide));
         }
     stopAndPrint(&start,&stop);
@@ -167,40 +179,61 @@ void printMat(DATA *mat, int rows, int cols) {
 }
 
 int main(){
-    DATA *h2h, *w, *delta, *c_host, *dest_c, *new_delta, *delta_host;
-    DATA *d_h2h, *d_w, *d_delta, *d_thread_delta, *d_dest_delta;
+    DATA *h2h, *w, *bias, *delta, *c_host, *dest_c, *new_delta, *delta_host, *delta_weight, *new_delta_weight, *delta_bias, *new_delta_bias;
+    DATA *d_h2h, *d_w, *d_bias,*d_delta, *d_thread_delta, *d_dest_delta, *d_delta_weight, *d_delta_bias, *d_delta_weight_dest, *d_delta_bias_dest;
 
     h2h=(DATA *)malloc(P*M*sizeof(DATA));
     w=(DATA *)malloc(M*N*sizeof(DATA));
-    delta=(DATA *)malloc(P*N*sizeof(DATA));
+    bias=(DATA *)malloc(M*sizeof(DATA));
+    delta=(DATA *)malloc(P*N*sizeof(DATA));//delta h2h
     new_delta=(DATA *)calloc(P*M,sizeof(DATA));
     delta_host=(DATA *)calloc(P*M,sizeof(DATA));
     c_host=(DATA *)calloc(M*N,sizeof(DATA));
     dest_c=(DATA *)calloc(M*N,sizeof(DATA));
+    new_delta_weight=(DATA *)calloc(M*N,sizeof(DATA));
+    delta_weight=(DATA *)calloc(M*N,sizeof(DATA));
+    new_delta_bias=(DATA *)calloc(M,sizeof(DATA));
+    delta_bias=(DATA *)calloc(M,sizeof(DATA));
 
     cudaMalloc((void**)&d_h2h,P*M*sizeof(DATA));
     cudaMalloc((void**)&d_w,M*N*sizeof(DATA));
+    cudaMalloc((void**)&d_bias,N*sizeof(DATA));
     cudaMalloc((void**)&d_delta,P*N*sizeof(DATA));
     cudaMalloc((void**)&d_dest_delta,P*M*sizeof(DATA));
     cudaMalloc((void**)&d_thread_delta,M*N*sizeof(DATA));
+    cudaMalloc((void**)&d_delta_weight,M*N*sizeof(DATA));
+    cudaMalloc((void**)&d_delta_bias,N*sizeof(DATA));
+    cudaMalloc((void**)&d_delta_weight_dest,M*N*sizeof(DATA));
+    cudaMalloc((void**)&d_delta_bias_dest,N*sizeof(DATA));
+
 /* -------------------------------init  -------------------*/
     for(int row=0;row<P;row++){
         for(int cola=0;cola<M;cola++)
-            h2h[row*M+cola]=(DATA)rand() / (DATA)RAND_MAX;//1.0f;
+            h2h[row*M+cola]=(DATA)rand() / (DATA)RAND_MAX;
         for(int colb=0;colb<N;colb++)
             delta[row*N+colb]=(DATA)rand() / (DATA)RAND_MAX;      
     }
-    for(int cola=0;cola<M;cola++)
-        for(int colb=0;colb<N;colb++)
-            w[cola*N+colb]=(DATA)rand() / (DATA)RAND_MAX;//1.0f;
+    for(int colb=0;colb<N;colb++){
+        //bias[colb]=(DATA)rand() / (DATA)RAND_MAX;
+        delta_bias[colb]=(DATA)rand() / (DATA)RAND_MAX;
+        for(int cola=0;cola<M;cola++){
+            w[cola*N+colb]=(DATA)rand() / (DATA)RAND_MAX;
+            delta_weight[cola*N+colb]=(DATA)rand() / (DATA)RAND_MAX;
+        }
+    }
 /*  -------------------------------------   */
     cudaMemcpy(d_h2h,h2h,P*M*sizeof(DATA),cudaMemcpyHostToDevice);
-    cudaMemcpy(d_w,w,N*M*sizeof(DATA),cudaMemcpyHostToDevice);
+    cudaMemcpy(d_w,w,M*N*sizeof(DATA),cudaMemcpyHostToDevice);
+    //cudaMemcpy(d_bias,bias,N*sizeof(DATA),cudaMemcpyHostToDevice);
     cudaMemcpy(d_delta,delta,P*N*sizeof(DATA),cudaMemcpyHostToDevice);
-    cudaMemcpy(new_delta,d_dest_delta,P*M*sizeof(DATA),cudaMemcpyHostToDevice);
-    cudaMemcpy(d_thread_delta,c_host,N*M*sizeof(DATA),cudaMemcpyHostToDevice);
+    cudaMemcpy(d_dest_delta,new_delta,P*M*sizeof(DATA),cudaMemcpyHostToDevice);
+    cudaMemcpy(d_thread_delta,c_host,M*N*sizeof(DATA),cudaMemcpyHostToDevice);//parte di delta_weight nuovo
+    cudaMemcpy(d_delta_weight,delta_weight,M*N*sizeof(DATA),cudaMemcpyHostToDevice);
+    cudaMemcpy(d_delta_bias,delta_bias,N*sizeof(DATA),cudaMemcpyHostToDevice);
+    cudaMemcpy(d_delta_weight_dest,delta_weight,M*N*sizeof(DATA),cudaMemcpyHostToDevice);
+    cudaMemcpy(d_delta_bias_dest,delta_bias,N*sizeof(DATA),cudaMemcpyHostToDevice);
 
-    backward(h2h, delta, dest_c, d_h2h, d_w, d_delta, d_thread_delta, d_dest_delta, M, N);
+    backward(h2h, delta, dest_c, d_h2h, d_w, d_delta_weight, d_delta_bias, d_delta, d_thread_delta, d_dest_delta, d_delta_weight_dest, d_delta_bias_dest, M, N);
     
     for(int row=0;row<P;row++){
         for(int cola=0;cola<M;cola++){
@@ -214,15 +247,17 @@ int main(){
     for(int row=0;row<P;row++){
         for(int colb=0;colb<N;colb++)
             for(int cola=0;cola<M;cola++)
-                c_host[cola*N+colb]+= h2h[row*M+cola]* delta[row*N+colb];      
+                c_host[cola*N+colb]+= eta*h2h[row*M+cola]* delta[row*N+colb];      //+ alpha * deltaWeight[cola][colb]
     }
 
     cudaMemcpy(dest_c,d_thread_delta,M*N*sizeof(DATA),cudaMemcpyDeviceToHost);
     cudaMemcpy(new_delta,d_dest_delta,P*M*sizeof(DATA),cudaMemcpyDeviceToHost);
+    cudaMemcpy(new_delta_bias,d_delta_bias_dest,N*sizeof(DATA),cudaMemcpyDeviceToHost);
+    cudaMemcpy(new_delta_weight,d_delta_weight_dest,M*N*sizeof(DATA),cudaMemcpyDeviceToHost);
 
-    //printMat(c_host,M,N);
+    printMat(c_host,M,N);
     printf("------------------------------\n");
-    //printMat(dest_c,M,N);
+    printMat(dest_c,M,N);
     printf("------------------------------\n");
     matsAreEquals(dest_c,c_host,M,N);
     printf("+++\n");
