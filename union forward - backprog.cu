@@ -582,8 +582,8 @@ void feedforward(DATA *INPUT, struct host_to_dev_mem * htdm, struct dev_struct *
 	int offset;
 
 	//startTimer(&start, &stop);
-	if (first_epoch) {
-		HANDLE_CUDA(cudaMemcpy(dev_htdm, htdm, (GLOBAL_BIAS_SIZE + GLOBAL_W_SIZE) * sizeof(DATA), cudaMemcpyHostToDevice));
+	if (first_epoch) {//il fattore 2 tiene conto anche dei delta utili sucessivamente nella fase di backpropagation
+		HANDLE_CUDA(cudaMemcpy(dev_htdm, htdm, 2*(GLOBAL_BIAS_SIZE + GLOBAL_W_SIZE) * sizeof(DATA), cudaMemcpyHostToDevice));
 	}
 	//stopAndPrint(&start, &stop);
 
@@ -636,28 +636,65 @@ void feedforward(DATA *INPUT, struct host_to_dev_mem * htdm, struct dev_struct *
 	deviceReduceBlockAtomicKernel << <OPTIMUM_BLOCK_NUM * 2, BLOCK_SIDE*BLOCK_SIDE >> > (dev_error_mat, dev_error, TOTAL_PATT*nupl[layers-1]);
 }
 /*	 BACKPROPAGATION	*/
-void backpropagation(DATA *host_h2h, DATA* host_delta, DATA* host_thread_delta, DATA* d_h2h, DATA* d_w, DATA* d_bias, DATA* d_delta_weight, DATA* d_delta_bias, DATA* d_delta, DATA* d_thread_delta, DATA* d_dest_delta, DATA* d_delta_weight_dest, DATA* d_delta_bias_dest, int width_h2h, int width_delta, cudaStream_t* streams){
+void backpropagation(struct host_to_dev_mem * htdm, struct dev_struct *dev_htdm , int* nupl , int layers, cudaStream_t* streams){
     dim3 grid,block;
-    optimum_grid_x(&grid,blockNum,width_h2h/blockSide,width_delta);
-    block.x= blockSide;
-    block.y= blockSide;
-    printf("grid :%d %d\n",grid.y,grid.x);
-    //cudaEvent_t start,stop;
-    //startTimer(&start,&stop);
-    for(int sw_x=0; sw_x < width_delta; sw_x += grid.x*blockSide){
-        for(int sw_y=0; sw_y < width_h2h;sw_y += grid.y*blockSide) {
-            for(int str=0;str<NSTREAMS;str++){
-                MMMulDevBack<<< grid,block,0,streams[str]>>>(d_h2h +sw_y+str*STREAMSIZE*width_h2h, d_w +sw_x+sw_y*width_delta, d_delta +sw_x +str*STREAMSIZE*width_delta, d_thread_delta+sw_x+sw_y*width_delta, d_dest_delta + sw_y +str*STREAMSIZE*width_h2h, d_delta_weight_dest + str*width_h2h*width_delta +sw_x+sw_y*width_delta, d_delta_bias_dest+ str*width_delta +sw_x, width_h2h, width_delta, min(width_h2h-sw_y,grid.y*blockSide) ,min(width_delta-sw_x,grid.x*blockSide),(1-sw_y));
-            }
-        }
-    }
-    //cudaDeviceSynchronize();
-    for(int sw_x=0; sw_x < width_delta; sw_x += grid.x*blockSide){
-        for(int sw_y=0; sw_y < width_h2h;sw_y += grid.y*blockSide) {
-            MMMulReduction<<<grid,block>>>(d_w +sw_x+sw_y*width_delta, d_bias+ sw_x, d_delta_weight +sw_x+sw_y*width_delta, d_delta_bias +sw_x , d_delta_weight_dest, d_delta_bias_dest, sw_x+sw_y*width_delta, sw_x,  width_h2h, width_delta, min(width_h2h-sw_y,grid.y*blockSide) ,min(width_delta-sw_x,grid.x*blockSide),(1-sw_y));
-        }
-    }
-    //stopAndPrint(&start,&stop);
+    block.x= BLOCK_SIDE;
+    block.y= BLOCK_SIDE;
+	
+
+	DATA *d_h2h, *d_w, *d_bias, *d_delta_weight, *d_delta_bias, *d_delta, *d_thread_delta, *d_dest_delta, *d_delta_weight_dest, *d_delta_bias_dest;
+	int width_h2h, int width_delta
+	int offset=str*STREAMSIZE;
+
+	for(int str=0;str<NSTREAMS;str++){
+		for (int l = (layers -2); l > 0; l++) {
+			optimum_grid_x(&grid, OPTIMUM_BLOCK_NUM, nupl[l]/BLOCK_SIDE, nupl[l + 1]);
+			printf("grid :%d %d\n",grid.y,grid.x);
+			//Set pointers
+			d_h2h = dev_htdm->H2H + htdm->matrix_H2H_index[0][l] + offset*nupl[l];
+			d_w = dev_htdm->WeightH2H + htdm->matrix_WB_index[0][l];
+			d_delta_weight_dest = dev_htdm->TempDeltaWeightH2H + NSTREAM*htdm->matrix_WB_index[0][l];
+			d_delta_bias_dest = dev_htdm->TempDevBiasH2H + NSTREAM*htdm->matrix_WB_index[1][l];
+			d_delta = dev_htdm->Delta + htdm->matrix_DELTA_index[0][l] + offset*nupl[l+1];
+			d_dest_delta = dev_htdm->Delta + htdm->matrix_DELTA_index[0][l-1] + offset*nupl[l];
+
+			
+			for(int sw_x=0; sw_x < nupl[l+1]; sw_x += grid.x*BLOCK_SIDE){
+				for(int sw_y=0; sw_y < nupl[l]; sw_y += grid.y*BLOCK_SIDE) {
+						MMMulDevBack<<< grid,block,0,streams[str]>>>(d_h2h +sw_y, d_w +sw_x+sw_y*nupl[l+1], d_delta +sw_x, d_thread_delta+sw_x+sw_y*nupl[l+1], d_dest_delta + sw_y, d_delta_weight_dest + str*nupl[l]*nupl[l+1] +sw_x+sw_y*nupl[l+1], d_delta_bias_dest+ str*nupl[l+1] +sw_x, nupl[l], nupl[l+1], min(nupl[l]-sw_y,grid.y*BLOCK_SIDE) ,min(nupl[l+1]-sw_x,grid.x*BLOCK_SIDE),(1-sw_y));
+				}
+			}		
+		}
+		optimum_grid_x(&grid, OPTIMUM_BLOCK_NUM, nupl[l]/BLOCK_SIDE, nupl[l + 1]);
+		printf("grid :%d %d\n",grid.y,grid.x);
+			//Set pointers
+		d_h2h = dev_htdm->H2H + offset*nupl[0];
+		d_w = dev_htdm->WeightH2H;
+		d_delta = dev_htdm->Delta + offset*nupl[1];
+		d_delta_weight_dest = dev_htdm->TempDeltaWeightH2H;
+		d_delta_bias_dest = dev_htdm->TempDevBiasH2H;
+
+		for(int sw_x=0; sw_x < nupl[1]; sw_x += grid.x*BLOCK_SIDE){
+			for(int sw_y=0; sw_y < nupl[0]; sw_y += grid.y*BLOCK_SIDE) {
+				MMMulDevBack<<< grid,block,0,streams[str]>>>(d_h2h +sw_y, d_w +sw_x+sw_y*nupl[1], d_delta +sw_x, d_thread_delta+sw_x+sw_y*nupl[1], NULL , d_delta_weight_dest + str*nupl[0]*nupl[1] +sw_x+sw_y*nupl[1], d_delta_bias_dest+ str*nupl[1] +sw_x, nupl[0], nupl[1], min(nupl[0]-sw_y,grid.y*BLOCK_SIDE) ,min(nupl[1]-sw_x,grid.x*BLOCK_SIDE),(1-sw_y));
+			}
+		}
+	}
+	/* REDUCTION */
+	for (int l = (layers -2); l >= 0; l++) {
+		d_w = dev_htdm->WeightH2H + htdm->matrix_WB_index[0][l];
+		d_bias = dev_htdm->BiasH2H + htdm->matrix_WB_index[1][l];
+		d_delta_weight = dev_htdm->DeltaWeightH2H + htdm->matrix_WB_index[0][l];
+		d_delta_bias = dev_htdm->DeltaBiasH2H + htdm->matrix_WB_index[1][l];
+		d_delta_weight_dest = dev_htdm->TempDeltaWeightH2H + NSTREAM*htdm->matrix_WB_index[0][l];
+		d_delta_bias_dest = dev_htdm->TempDevBiasH2H + NSTREAM*htdm->matrix_WB_index[1][l];
+
+		for(int sw_x=0; sw_x < nupl[l+1]; sw_x += grid.x*BLOCK_SIDE){
+			for(int sw_y=0; sw_y < nupl[l];sw_y += grid.y*BLOCK_SIDE) {
+				MMMulReduction<<<grid,block>>>(d_w +sw_x+sw_y*nupl[l+1], d_bias+ sw_x, d_delta_weight +sw_x+sw_y*nupl[l+1], d_delta_bias +sw_x , d_delta_weight_dest, d_delta_bias_dest, sw_x+sw_y*nupl[l+1], sw_x,  nupl[l], nupl[l+1], min(nupl[l]-sw_y,grid.y*BLOCK_SIDE) ,min(nupl[l+1]-sw_x,grid.x*BLOCK_SIDE),(1-sw_y));
+			}
+		}
+	}
 }
 
 
