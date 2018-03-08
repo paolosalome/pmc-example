@@ -5,14 +5,14 @@
 #define min(a,b) (a) < (b) ? (a) : (b)
 #define BOOL int
 #define blockSide 16
-#define blockNum 16
-#define epsilon 1//e-3
+#define blockNum 8
+#define epsilon 1e-1
 #define N 56
 #define M 784
-#define P 30000
+#define P 60000
 #define DATA float
-#define eta 1.0f//0.05f
-#define alpha 1.0f
+#define eta 0.05f
+#define alpha 0.8f
 #define NSTREAMS 3
 #define STREAMSIZE P / NSTREAMS
 
@@ -43,11 +43,11 @@ void stopAndPrint(cudaEvent_t *start, cudaEvent_t *stop) {
 
 /* la matrice di destinazione è width_h2h x width_delta     */
 /* h2h_corner,delta_corner  sono in previsione di una "sliding grid" */
-__device__ void matrix_array_block(DATA* h2h, DATA* w, DATA* delta, DATA* thr_delta_W, DATA* dest_delta, DATA* delta_weight_dest, DATA* delta_bias_dest, int width_h2h, int width_delta, int A_right_limit, int B_right_limit,int stream,BOOL enable_bias){
+__device__ void MMMulDevPartialBack(DATA* h2h, DATA* w, DATA* delta, DATA* thr_delta_W, DATA* dest_delta, DATA* delta_weight_dest, DATA* delta_bias_dest, int width_h2h, int width_delta, int h2h_right_limit, int delta_right_limit, BOOL enable_bias){
     int t_x = threadIdx.x;
     int t_y = threadIdx.y;
-    int idx = t_x + blockIdx.x*blockSide ; 
-    int idy = t_y + blockIdx.y*blockSide ; 
+    /* int idx = t_x + blockIdx.x*blockSide ; 
+    int idy = t_y + blockIdx.y*blockSide ;  */
     int pattern;
     int h2h_corner = blockIdx.y*blockSide;
     int delta_corner = blockIdx.x*blockSide;
@@ -59,33 +59,28 @@ __device__ void matrix_array_block(DATA* h2h, DATA* w, DATA* delta, DATA* thr_de
     __shared__ DATA block_delta[blockSide*blockSide];
     __shared__ DATA bias_to_update[blockSide*blockSide];
 
-    int max_b_x = ((delta_corner + blockSide) < B_right_limit) ? blockSide: (B_right_limit - delta_corner);
-    int max_a_x = ((h2h_corner + blockSide) < A_right_limit) ? blockSide: (A_right_limit - h2h_corner);
+    int max_b_x = ((delta_corner + blockSide) < delta_right_limit) ? blockSide: (delta_right_limit - delta_corner);
+    int max_a_x = ((h2h_corner + blockSide) < h2h_right_limit) ? blockSide: (h2h_right_limit - h2h_corner);
 
     temp_sum_delta_h2h[t_x+t_y*blockSide]=0.0f;
     block_w[t_x*blockSide+t_y] = (max_a_x > t_y && max_b_x > t_x) ? w[t_y*width_delta + t_x]:0.0f;
-    //block_w[t_x*blockSide+t_y] = (max_a_x > t_y && max_b_x > t_x) ? 1.0f :0.0f;
+
     if(enable_bias==1)
         bias_to_update[t_y*blockSide + t_x] = 0.0f;
 
     for(int curr_patterns=0;curr_patterns<STREAMSIZE;curr_patterns+=blockSide){
         pattern = (curr_patterns  + blockSide > STREAMSIZE) ? (STREAMSIZE-curr_patterns): blockSide ;
 
-        //DATA val = ((curr_patterns+ t_y) < P && max_b_x > t_x) ? delta[t_y*width_delta + t_x + curr_patterns*width_delta]:0.0f;
-
         block_h2h[t_y*blockSide+t_x]= ((curr_patterns+ t_y) < STREAMSIZE && max_a_x > t_x) ? h2h[t_y*width_h2h + t_x +curr_patterns*width_h2h]:0.0f;
         block_delta[t_y*blockSide+t_x] = ((curr_patterns+ t_y) < STREAMSIZE && max_b_x > t_x) ? delta[t_y*width_delta + t_x + curr_patterns*width_delta]:0.0f;
-        //block_delta[t_y*blockSide+t_x] = ((curr_patterns+ t_y) < STREAMSIZE && max_b_x > t_x) ? 1.0f:0.0f;
         __syncthreads();
-
+        //DATA val = ((curr_patterns+ t_y) < P && max_b_x > t_x) ? delta[t_y*width_delta + t_x + curr_patterns*width_delta]:0.0f;
         DATA val = block_delta[t_y*blockSide+t_x];
         DATA temp=0.0f;
         
         for(int i=0 ;i<blockSide;i++){
-        /*  QUI CI VA IL PRODOTTO TRA TEMP=W*DELTA   */
             temp += block_delta[t_y*blockSide+i]*block_w[i*blockSide+t_x];//product delta*W by trd[ty][tx]
             temp_shifted_mul[t_y][ t_x + i*blockSide ] =  val*block_h2h[t_y*blockSide+i];
-           //temp_shifted_mul[t_y][ t_x + i*blockSide ] =  ( (curr_patterns+ t_y) < P && max_a_x > i) ? val*h2h[t_y*width_h2h + i +curr_patterns*width_h2h]:0.0f;
         }    
 
         __syncthreads();
@@ -102,18 +97,17 @@ __device__ void matrix_array_block(DATA* h2h, DATA* w, DATA* delta, DATA* thr_de
         if(enable_bias==1)//solo i blocchi con blocky = 0
             bias_to_update[t_y*blockSide + t_x] += block_delta[t_y*blockSide + t_x];
     }
-    if( (t_y + h2h_corner) < A_right_limit && (t_x + delta_corner) < B_right_limit){
+    if( (t_y + h2h_corner) < h2h_right_limit && (t_x + delta_corner) < delta_right_limit){
         thr_delta_W[t_x+t_y*width_delta] = temp_sum_delta_h2h[t_y*blockSide+ t_x];
         delta_weight_dest[t_x+t_y*width_delta] = temp_sum_delta_h2h[t_y*blockSide+ t_x];
     }
-    if(enable_bias==1 &&  t_y==0 && (t_x + delta_corner) < B_right_limit){
+    if(enable_bias==1 &&  t_y==0 && (t_x + delta_corner) < delta_right_limit){
         DATA tempBias=0.0f;
         for(int i=0;i<blockSide;i++)
             tempBias+=bias_to_update[i*blockSide+t_x];
         delta_bias_dest[t_x] = eta*tempBias ;
-        //printf("enable_bias [%d][%d] %d temp:%f :  %f \n",idy,idx,enable_bias,tempBias,delta_bias_dest[t_x]);
     }
-    __syncthreads();
+    //__syncthreads();
 }
 
 /* si può la riduzione finale di W sommando i delta calcolati e riaggiornare quindi il delta W con gli stessi .
@@ -126,7 +120,7 @@ __device__ void matrix_array_block(DATA* h2h, DATA* w, DATA* delta, DATA* thr_de
 
 
 
-__device__ void reductionBlock(DATA* W, DATA* BIAS, DATA* DELTA_WEIGHT, DATA* DELTA_BIAS, DATA* DELTA_WEIGHT_DEST, DATA* DELTA_BIAS_DEST, int offset_weight, int offset_bias, int width_h2h, int width_delta,  int Y_right_limit, int X_right_limit, BOOL enable_bias){
+__device__ void MMMulReductionBlock(DATA* W, DATA* BIAS, DATA* DELTA_WEIGHT, DATA* DELTA_BIAS, DATA* DELTA_WEIGHT_DEST, DATA* DELTA_BIAS_DEST, int offset_weight, int offset_bias, int width_h2h, int width_delta,  int Y_right_limit, int X_right_limit, BOOL enable_bias){
     
     int t_x = threadIdx.x;
     int t_y = threadIdx.y;
@@ -156,30 +150,28 @@ __device__ void reductionBlock(DATA* W, DATA* BIAS, DATA* DELTA_WEIGHT, DATA* DE
         DELTA_WEIGHT[t_x + t_y*width_delta] = dw_loc;
         //printf("enable_bias [%d][%d] -- DELTA WEIGHT:%f    local %f  %d-%d\n",b_y+t_y,b_x+t_x, DELTA_WEIGHT[t_x + t_y*width_delta],dw_loc,Y_right_limit,X_right_limit);
     }
-    __syncthreads();
-
 }
 
-__global__ void reduction(DATA* W, DATA* BIAS, DATA* DELTA_WEIGHT, DATA* DELTA_BIAS, DATA* DELTA_WEIGHT_DEST, DATA* DELTA_BIAS_DEST, int offset_weight, int offset_bias, int width_h2h, int width_delta,  int Y_right_limit, int X_right_limit, BOOL enable_bias){
+__global__ void MMMulReduction(DATA* W, DATA* BIAS, DATA* DELTA_WEIGHT, DATA* DELTA_BIAS, DATA* DELTA_WEIGHT_DEST, DATA* DELTA_BIAS_DEST, int offset_weight, int offset_bias, int width_h2h, int width_delta,  int Y_right_limit, int X_right_limit, BOOL enable_bias){
     int b_x = blockIdx.x*blockSide;
     int b_y = blockIdx.y*blockSide;
     //enable bias vale 1 se la griglia si è spostata lungo la x . Gli unici blocchi che calcoleranno il delta bias sono quelli con blockIdy = 0
     if(b_x < X_right_limit && b_y <Y_right_limit)
-        reductionBlock(W+b_x+b_y*width_delta, BIAS+ b_x, DELTA_WEIGHT+b_x+b_y*width_delta, DELTA_BIAS+ b_x, DELTA_WEIGHT_DEST, DELTA_BIAS_DEST, offset_weight, offset_bias, width_h2h, width_delta,  Y_right_limit, X_right_limit, enable_bias*(1-blockIdx.y));
-    __syncthreads();
+        MMMulReductionBlock(W+b_x+b_y*width_delta, BIAS+ b_x, DELTA_WEIGHT+b_x+b_y*width_delta, DELTA_BIAS+ b_x, DELTA_WEIGHT_DEST, DELTA_BIAS_DEST, offset_weight, offset_bias, width_h2h, width_delta,  Y_right_limit, X_right_limit, enable_bias*(1-blockIdx.y));
+    //__syncthreads();
 }
-__global__ void matrix_mul(DATA* H2H, DATA* W, DATA* DELTA, DATA* THR_DELTA_W_H2H, DATA* DEST_DELTA,DATA* DELTA_WEIGHT_DEST, DATA* DELTA_BIAS_DEST, int width_h2h, int width_delta, int A_right_limit, int B_right_limit, int stream, BOOL enable_bias){
+__global__ void MMMulDevBack(DATA* H2H, DATA* W, DATA* DELTA, DATA* THR_DELTA_W_H2H, DATA* DEST_DELTA,DATA* DELTA_WEIGHT_DEST, DATA* DELTA_BIAS_DEST, int width_h2h, int width_delta, int h2h_right_limit, int delta_right_limit, BOOL enable_bias){
     int b_x = blockIdx.x*blockSide;
     int b_y = blockIdx.y*blockSide;
     //enable bias vale 1 se la griglia si è spostata lungo la x . Gli unici blocchi che calcoleranno il delta bias sono quelli con blockIdy = 0
-    if(b_x < B_right_limit && b_y <A_right_limit)
-        matrix_array_block(H2H +b_y, W +b_x+b_y*width_delta, DELTA +b_x, THR_DELTA_W_H2H +b_x+b_y*width_delta, DEST_DELTA+b_y, DELTA_WEIGHT_DEST +b_x+b_y*width_delta, DELTA_BIAS_DEST +b_x, width_h2h, width_delta, A_right_limit, B_right_limit, stream, enable_bias*(1-blockIdx.y));
-    __syncthreads();
+    if(b_x < delta_right_limit && b_y <h2h_right_limit)
+        MMMulDevPartialBack(H2H +b_y, W +b_x+b_y*width_delta, DELTA +b_x, THR_DELTA_W_H2H +b_x+b_y*width_delta, DEST_DELTA+b_y, DELTA_WEIGHT_DEST +b_x+b_y*width_delta, DELTA_BIAS_DEST +b_x, width_h2h, width_delta, h2h_right_limit, delta_right_limit, enable_bias*(1-blockIdx.y));
+    //__syncthreads();
 }
 
-void optimum_grid_x(dim3* grid,int max_block,int y_limit){
+void optimum_grid_x(dim3* grid,int max_block,int y_limit, int width_delta){
     
-    int x = min((N+blockSide-1)/blockSide,max_block);
+    int x = min((width_delta+blockSide-1)/blockSide,max_block);
     int y=max_block/x;
     int prod=x*y;
     int new_prod;
@@ -195,11 +187,10 @@ void optimum_grid_x(dim3* grid,int max_block,int y_limit){
 
     grid->x = x;
     grid->y = y;
-
 }                                                                    
 void backward(DATA *host_h2h, DATA* host_delta, DATA* host_thread_delta, DATA* d_h2h, DATA* d_w, DATA* d_bias, DATA* d_delta_weight, DATA* d_delta_bias, DATA* d_delta, DATA* d_thread_delta, DATA* d_dest_delta, DATA* d_delta_weight_dest, DATA* d_delta_bias_dest, int width_h2h, int width_delta, cudaStream_t* streams){
     dim3 grid,block;
-    optimum_grid_x(&grid,blockNum,width_h2h/blockSide);
+    optimum_grid_x(&grid,blockNum,width_h2h/blockSide,width_delta);
     block.x= blockSide;
     block.y= blockSide;
     printf("grid :%d %d\n",grid.y,grid.x);
@@ -208,19 +199,17 @@ void backward(DATA *host_h2h, DATA* host_delta, DATA* host_thread_delta, DATA* d
     for(int sw_x=0; sw_x < width_delta; sw_x += grid.x*blockSide){
         for(int sw_y=0; sw_y < width_h2h;sw_y += grid.y*blockSide) {
             for(int str=0;str<NSTREAMS;str++){
-                matrix_mul<<< grid,block,0,streams[str]>>>(d_h2h +sw_y+str*STREAMSIZE*width_h2h, d_w +sw_x+sw_y*width_delta, d_delta +sw_x +str*STREAMSIZE*width_delta, d_thread_delta+sw_x+sw_y*width_delta, d_dest_delta + sw_y +str*STREAMSIZE*width_h2h, d_delta_weight_dest + str*width_h2h*width_delta +sw_x+sw_y*width_delta, d_delta_bias_dest+ str*width_delta +sw_x, width_h2h, width_delta, min(width_h2h-sw_y,grid.y*blockSide) ,min(width_delta-sw_x,grid.x*blockSide),str,(1-sw_y));
+                MMMulDevBack<<< grid,block,0,streams[str]>>>(d_h2h +sw_y+str*STREAMSIZE*width_h2h, d_w +sw_x+sw_y*width_delta, d_delta +sw_x +str*STREAMSIZE*width_delta, d_thread_delta+sw_x+sw_y*width_delta, d_dest_delta + sw_y +str*STREAMSIZE*width_h2h, d_delta_weight_dest + str*width_h2h*width_delta +sw_x+sw_y*width_delta, d_delta_bias_dest+ str*width_delta +sw_x, width_h2h, width_delta, min(width_h2h-sw_y,grid.y*blockSide) ,min(width_delta-sw_x,grid.x*blockSide),(1-sw_y));
             }
         }
     }
-    cudaDeviceSynchronize();
+    //cudaDeviceSynchronize();
     for(int sw_x=0; sw_x < width_delta; sw_x += grid.x*blockSide){
         for(int sw_y=0; sw_y < width_h2h;sw_y += grid.y*blockSide) {
-            reduction<<<grid,block>>>(d_w +sw_x+sw_y*width_delta, d_bias+ sw_x, d_delta_weight +sw_x+sw_y*width_delta, d_delta_bias +sw_x , d_delta_weight_dest, d_delta_bias_dest, sw_x+sw_y*width_delta, sw_x,  width_h2h, width_delta, min(width_h2h-sw_y,grid.y*blockSide) ,min(width_delta-sw_x,grid.x*blockSide),(1-sw_y));
+            MMMulReduction<<<grid,block>>>(d_w +sw_x+sw_y*width_delta, d_bias+ sw_x, d_delta_weight +sw_x+sw_y*width_delta, d_delta_bias +sw_x , d_delta_weight_dest, d_delta_bias_dest, sw_x+sw_y*width_delta, sw_x,  width_h2h, width_delta, min(width_h2h-sw_y,grid.y*blockSide) ,min(width_delta-sw_x,grid.x*blockSide),(1-sw_y));
         }
     }
-    
     //stopAndPrint(&start,&stop);
-
 }
 
 /*Check device*/
@@ -230,7 +219,7 @@ BOOL matsAreEquals(DATA *A, DATA *B, int rows, int cols) {
 		for (int j = 0; j < cols; j++) { // the first column is for adapting the data
 			float err = fabs(A[i*cols + j] - B[i*cols + j]);
 			//printf("Error in i=%d,j=%d: %f\n", i, j, err);
-			if (err >= epsilon) { printf("row: %d, col: %d\n", i, j); return 0; }
+			if (err >= epsilon) { printf("row: %d, col: %d----%f,%f\n", i, j,A[i*cols + j],B[i*cols + j]); return 0; }
 		}
 	}
 	return 1;
@@ -338,12 +327,14 @@ int main(){
     cudaMemcpy(delta_bias,d_delta_bias, N*sizeof(DATA),cudaMemcpyDeviceToHost);
     cudaMemcpy(delta_weight,d_delta_weight, M*N*sizeof(DATA),cudaMemcpyDeviceToHost);
 
+
+    printf(" delta W-h2h : \n");
+    matsAreEquals(delta_weight,c_host,M,N);
+    printf("------------------------------\n");
     //printMat(c_host,M,N);
     printf("------------------------------\n");
     //printMat(delta_weight,M,N);
-    printf("------------------------------\n");
-    printf(" delta W-h2h : \n");
-    matsAreEquals(delta_weight,c_host,M,N);
+    
     printf(" \ndelta h2h : \n");
     matsAreEquals(new_delta,delta_host,P,M);
     printf("------------------------------\n");
@@ -353,8 +344,10 @@ int main(){
   
     printf(" \ndelta bias : \n");
     matsAreEquals(new_delta_bias,delta_bias,1,N);
+    /* printf("------------------------------\n");
     printMat(new_delta_bias,1,N);
-    printMat(delta_bias,1,N);
+    printf("------------------------------\n");
+    printMat(delta_bias,1,N); */
  
     
         
