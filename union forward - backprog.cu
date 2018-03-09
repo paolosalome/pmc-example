@@ -53,8 +53,8 @@ grid_settings gs = { { OPTIMUM_BLOCK_NUM_FIRST_LAYER, OPTIMUM_BLOCK_NUM, OPTIMUM
 
 typedef struct host_to_dev_mem {
 	DATA WeightH2H[GLOBAL_W_SIZE];
-	DATA DeltaWeightH2H[GLOBAL_W_SIZE];
 	DATA BiasH2H[GLOBAL_BIAS_SIZE];
+	DATA DeltaWeightH2H[GLOBAL_W_SIZE];
 	DATA DeltaBiasH2H[GLOBAL_BIAS_SIZE];
 	DATA Delta[GLOBAL_DELTA_SIZE];
 	DATA H2H[GLOBAL_H_SIZE];
@@ -65,8 +65,8 @@ typedef struct host_to_dev_mem {
 
 typedef struct dev_struct {
 	DATA WeightH2H[GLOBAL_W_SIZE];
-	DATA DeltaWeightH2H[GLOBAL_W_SIZE];
 	DATA BiasH2H[GLOBAL_BIAS_SIZE];
+	DATA DeltaWeightH2H[GLOBAL_W_SIZE];
 	DATA DeltaBiasH2H[GLOBAL_BIAS_SIZE];
 	DATA Delta[GLOBAL_DELTA_SIZE];
 	DATA H2H[GLOBAL_H_SIZE];
@@ -139,7 +139,7 @@ __global__ void MMMulReduction(DATA* , DATA* , DATA* , DATA* , DATA* , DATA* , i
 
 /*HOST*/
 void feedforward(DATA *, struct host_to_dev_mem *, struct dev_struct *, DATA *, DATA *, int *, int, cudaStream_t *, BOOL);
-void backward(DATA *, DATA* , DATA* , DATA* , DATA* , DATA* , DATA* , DATA* , DATA* , DATA* , DATA* , DATA* , DATA* , int , int, cudaStream_t* );
+void backpropagation(DATA *, DATA* , DATA* , DATA* , DATA* , DATA* , DATA* , DATA* , DATA* , DATA* , DATA* , DATA* , DATA* , int , int, cudaStream_t* );
 
 void HOST_feedforward(DATA *, DATA **, DATA **, DATA **, int *);
 void printMat(DATA *, int, int);
@@ -238,19 +238,24 @@ int main(void) {
 	cudaEvent_t start, stop;
 
 	startTimer(&start, &stop);
-	feedforward(INPUT_MAT, htdm, dev_htdm, DEV_ERROR_MAT, DEV_ERROR, nupl, TOTAL_LAYER, streams, 1);
+	//feedforward(INPUT_MAT, htdm, dev_htdm, DEV_ERROR_MAT, DEV_ERROR, nupl, TOTAL_LAYER, streams, 1);
+	feedforward(INPUT_MAT, htdm, dev_htdm, dev_htdm->DELTA+ htdm->matrix_DELTA_index[0][TOTAL_LAYER-2], DEV_ERROR, nupl, TOTAL_LAYER, streams, 1);
 	stopAndPrint(&start, &stop);
 	//cudaDeviceSynchronize();//
 	
 	HANDLE_CUDA(cudaMemcpy(ERROR, DEV_ERROR, sizeof(DATA), cudaMemcpyDeviceToHost));
 	printf("Reduced Error: %f\n", *ERROR);
 	
-	/*
-	HANDLE_CUDA(cudaMemcpy(ERROR_MAT, DEV_ERROR_MAT, TOTAL_PATT*NEURO_OUTPUT * sizeof(DATA), cudaMemcpyDeviceToHost));
-	printMat(ERROR_MAT, TOTAL_PATT, NEURO_OUTPUT);
+	
+	//HANDLE_CUDA(cudaMemcpy(ERROR_MAT, DEV_ERROR_MAT, TOTAL_PATT*NEURO_OUTPUT * sizeof(DATA), cudaMemcpyDeviceToHost));
+	
+	HANDLE_CUDA(cudaMemcpy(ERROR_MAT, dev_htdm->DELTA+ htdm->matrix_DELTA_index[0][TOTAL_LAYER-2], TOTAL_PATT*NEURO_OUTPUT * sizeof(DATA), cudaMemcpyDeviceToHost));
+	//printMat(ERROR_MAT, TOTAL_PATT, NEURO_OUTPUT);
 	DATA red_host = errorReductionHost(ERROR_MAT, TOTAL_PATT, NEURO_OUTPUT);
 	printf("host reduction error : %f\n", red_host);
-	*/
+	
+	backpropagation(htdm, dev_htdm , nupl, TOTAL_LAYER, streams);
+	HANDLE_CUDA(cudaMemcpy(htdm + GLOBAL_W_SIZE+GLOBAL_BIAS_SIZE, dev_htdm, GLOBAL_W_SIZE+GLOBAL_BIAS_SIZE+GLOBAL_DELTA_SIZE, cudaMemcpyDeviceToHost));
 
 	/*-------------------------------------END---FEEDFORWARD-------------------------------------------*/
 
@@ -641,7 +646,6 @@ void backpropagation(struct host_to_dev_mem * htdm, struct dev_struct *dev_htdm 
     dim3 grid,block;
     block.x= BLOCK_SIDE;
     block.y= BLOCK_SIDE;
-	
 
 	DATA *d_h2h, *d_w, *d_bias, *d_delta_weight, *d_delta_bias, *d_delta, *d_dest_delta, *d_delta_weight_dest, *d_delta_bias_dest;
 	
@@ -669,7 +673,7 @@ void backpropagation(struct host_to_dev_mem * htdm, struct dev_struct *dev_htdm 
 		}
 		optimum_grid_x(&grid, OPTIMUM_BLOCK_NUM, nupl[0]/BLOCK_SIDE, nupl[1]);
 		printf("grid :%d %d\n",grid.y,grid.x);
-			//Set pointers
+
 		d_h2h = dev_htdm->H2H + offset*nupl[0];
 		d_w = dev_htdm->WeightH2H;
 		d_delta_weight_dest = dev_htdm->TempDeltaWeightH2H;
