@@ -643,18 +643,19 @@ void backpropagation(struct host_to_dev_mem * htdm, struct dev_struct *dev_htdm 
 	
 
 	DATA *d_h2h, *d_w, *d_bias, *d_delta_weight, *d_delta_bias, *d_delta, *d_thread_delta, *d_dest_delta, *d_delta_weight_dest, *d_delta_bias_dest;
-	int width_h2h, int width_delta
-	int offset=str*STREAMSIZE;
-
+	
+	int offset;
 	for(int str=0;str<NSTREAMS;str++){
+		offset=str*STREAMSIZE;
+
 		for (int l = (layers -2); l > 0; l++) {
 			optimum_grid_x(&grid, OPTIMUM_BLOCK_NUM, nupl[l]/BLOCK_SIDE, nupl[l + 1]);
 			printf("grid :%d %d\n",grid.y,grid.x);
 			//Set pointers
 			d_h2h = dev_htdm->H2H + htdm->matrix_H2H_index[0][l] + offset*nupl[l];
 			d_w = dev_htdm->WeightH2H + htdm->matrix_WB_index[0][l];
-			d_delta_weight_dest = dev_htdm->TempDeltaWeightH2H + NSTREAM*htdm->matrix_WB_index[0][l];
-			d_delta_bias_dest = dev_htdm->TempDevBiasH2H + NSTREAM*htdm->matrix_WB_index[1][l];
+			d_delta_weight_dest = dev_htdm->TempDeltaWeightH2H + NSTREAMS*htdm->matrix_WB_index[0][l];
+			d_delta_bias_dest = dev_htdm->TempDeltaBiasH2H + NSTREAMS*htdm->matrix_WB_index[1][l];
 			d_delta = dev_htdm->Delta + htdm->matrix_DELTA_index[0][l] + offset*nupl[l+1];
 			d_dest_delta = dev_htdm->Delta + htdm->matrix_DELTA_index[0][l-1] + offset*nupl[l];
 
@@ -665,14 +666,14 @@ void backpropagation(struct host_to_dev_mem * htdm, struct dev_struct *dev_htdm 
 				}
 			}		
 		}
-		optimum_grid_x(&grid, OPTIMUM_BLOCK_NUM, nupl[l]/BLOCK_SIDE, nupl[l + 1]);
+		optimum_grid_x(&grid, OPTIMUM_BLOCK_NUM, nupl[0]/BLOCK_SIDE, nupl[1]);
 		printf("grid :%d %d\n",grid.y,grid.x);
 			//Set pointers
 		d_h2h = dev_htdm->H2H + offset*nupl[0];
 		d_w = dev_htdm->WeightH2H;
-		d_delta = dev_htdm->Delta + offset*nupl[1];
 		d_delta_weight_dest = dev_htdm->TempDeltaWeightH2H;
-		d_delta_bias_dest = dev_htdm->TempDevBiasH2H;
+		d_delta_bias_dest = dev_htdm->TempDeltaBiasH2H;
+		d_delta = dev_htdm->Delta + offset*nupl[1];
 
 		for(int sw_x=0; sw_x < nupl[1]; sw_x += grid.x*BLOCK_SIDE){
 			for(int sw_y=0; sw_y < nupl[0]; sw_y += grid.y*BLOCK_SIDE) {
@@ -682,12 +683,14 @@ void backpropagation(struct host_to_dev_mem * htdm, struct dev_struct *dev_htdm 
 	}
 	/* REDUCTION */
 	for (int l = (layers -2); l >= 0; l++) {
+		optimum_grid_x(&grid, OPTIMUM_BLOCK_NUM, nupl[l]/BLOCK_SIDE, nupl[l + 1]);
+
 		d_w = dev_htdm->WeightH2H + htdm->matrix_WB_index[0][l];
 		d_bias = dev_htdm->BiasH2H + htdm->matrix_WB_index[1][l];
 		d_delta_weight = dev_htdm->DeltaWeightH2H + htdm->matrix_WB_index[0][l];
 		d_delta_bias = dev_htdm->DeltaBiasH2H + htdm->matrix_WB_index[1][l];
-		d_delta_weight_dest = dev_htdm->TempDeltaWeightH2H + NSTREAM*htdm->matrix_WB_index[0][l];
-		d_delta_bias_dest = dev_htdm->TempDevBiasH2H + NSTREAM*htdm->matrix_WB_index[1][l];
+		d_delta_weight_dest = dev_htdm->TempDeltaWeightH2H + NSTREAMS*htdm->matrix_WB_index[0][l];
+		d_delta_bias_dest = dev_htdm->TempDeltaBiasH2H + NSTREAMS*htdm->matrix_WB_index[1][l];
 
 		for(int sw_x=0; sw_x < nupl[l+1]; sw_x += grid.x*BLOCK_SIDE){
 			for(int sw_y=0; sw_y < nupl[l];sw_y += grid.y*BLOCK_SIDE) {
