@@ -130,8 +130,8 @@ __device__ void MMMulDevPartialFeed(DATA *, DATA *, DATA *, DATA *, DATA*, DATA 
 __global__ void MMMulDevFeed(DATA *, DATA *, DATA *, DATA *, DATA *, DATA*, unsigned int, unsigned int, unsigned int, unsigned int);
 
 /* MMMul backprog*/
-__device__ void MMMulDevPartialBack(DATA* , DATA* , DATA* , DATA* , DATA* , DATA* , DATA* , int , int , int , int , BOOL );
-__global__ void MMMulDevBack(DATA* , DATA* , DATA* , DATA* , DATA* ,DATA* , DATA* , int , int , int , int , BOOL );
+__device__ void MMMulDevPartialBack(DATA* , DATA* , DATA* , DATA* , DATA* , DATA* , int , int , int , int , BOOL, int );
+__global__ void MMMulDevBack(DATA* , DATA* , DATA* , DATA* ,DATA* , DATA* , int , int , int , int , BOOL, int );
 
 __device__ void MMMulReductionBlock(DATA* , DATA* , DATA* , DATA* , DATA* , DATA* , int , int , int , int ,  int , int , BOOL );
 __global__ void MMMulReduction(DATA* , DATA* , DATA* , DATA* , DATA* , DATA* , int , int , int , int ,  int , int , BOOL );
@@ -437,7 +437,7 @@ __global__ void MMMulDevFeed(DATA *h2h, DATA *w, DATA *biases, DATA *h2h_dest, D
 
 /* la matrice di destinazione è width_h2h x width_delta     */
 /* h2h_corner,delta_corner  sono in previsione di una "sliding grid" */
-__device__ void MMMulDevPartialBack(DATA* h2h, DATA* w, DATA* delta, DATA* thr_delta_W, DATA* dest_delta, DATA* delta_weight_dest, DATA* delta_bias_dest, int width_h2h, int width_delta, int h2h_right_limit, int delta_right_limit, BOOL enable_bias){
+__device__ void MMMulDevPartialBack(DATA* h2h, DATA* w, DATA* delta, DATA* dest_delta, DATA* delta_weight_dest, DATA* delta_bias_dest, int width_h2h, int width_delta, int h2h_right_limit, int delta_right_limit, BOOL enable_bias, int layer){
     int t_x = threadIdx.x;
     int t_y = threadIdx.y;
     /* int idx = t_x + blockIdx.x*BLOCK_SIDE ; 
@@ -456,8 +456,9 @@ __device__ void MMMulDevPartialBack(DATA* h2h, DATA* w, DATA* delta, DATA* thr_d
     int max_b_x = ((delta_corner + BLOCK_SIDE) < delta_right_limit) ? BLOCK_SIDE: (delta_right_limit - delta_corner);
     int max_a_x = ((h2h_corner + BLOCK_SIDE) < h2h_right_limit) ? BLOCK_SIDE: (h2h_right_limit - h2h_corner);
 
-    temp_sum_delta_h2h[t_x+t_y*BLOCK_SIDE]=0.0f;
-    block_w[t_x*BLOCK_SIDE+t_y] = (max_a_x > t_y && max_b_x > t_x) ? w[t_y*width_delta + t_x]:0.0f;
+	temp_sum_delta_h2h[t_x+t_y*BLOCK_SIDE]=0.0f;
+	if(layer>0)
+	    block_w[t_x*BLOCK_SIDE+t_y] = (max_a_x > t_y && max_b_x > t_x) ? w[t_y*width_delta + t_x]:0.0f;
 
     if(enable_bias==1)
         bias_to_update[t_y*BLOCK_SIDE + t_x] = 0.0f;
@@ -466,19 +467,20 @@ __device__ void MMMulDevPartialBack(DATA* h2h, DATA* w, DATA* delta, DATA* thr_d
         pattern = (curr_patterns  + BLOCK_SIDE > STREAMSIZE) ? (STREAMSIZE-curr_patterns): BLOCK_SIDE ;
 
         block_h2h[t_y*BLOCK_SIDE+t_x]= ((curr_patterns+ t_y) < STREAMSIZE && max_a_x > t_x) ? h2h[t_y*width_h2h + t_x +curr_patterns*width_h2h]:0.0f;
-        block_delta[t_y*BLOCK_SIDE+t_x] = ((curr_patterns+ t_y) < STREAMSIZE && max_b_x > t_x) ? delta[t_y*width_delta + t_x + curr_patterns*width_delta]:0.0f;
+		block_delta[t_y*BLOCK_SIDE+t_x] = ((curr_patterns+ t_y) < STREAMSIZE && max_b_x > t_x) ? delta[t_y*width_delta + t_x + curr_patterns*width_delta]:0.0f;
         __syncthreads();
         //DATA val = ((curr_patterns+ t_y) < P && max_b_x > t_x) ? delta[t_y*width_delta + t_x + curr_patterns*width_delta]:0.0f;
         DATA val = block_delta[t_y*BLOCK_SIDE+t_x];
         DATA temp=0.0f;
         
         for(int i=0 ;i<BLOCK_SIDE;i++){
-            temp += block_delta[t_y*BLOCK_SIDE+i]*block_w[i*BLOCK_SIDE+t_x];//product delta*W by trd[ty][tx]
+			if(layer>0)
+            	temp += block_delta[t_y*BLOCK_SIDE+i]*block_w[i*BLOCK_SIDE+t_x];//product delta*W by trd[ty][tx]
             temp_shifted_mul[t_y][ t_x + i*BLOCK_SIDE ] =  val*block_h2h[t_y*BLOCK_SIDE+i];
         }    
 
         __syncthreads();
-        if( t_y < pattern)
+        if(layer > 0 && t_y < pattern)
             atomicAdd(&dest_delta[t_y*width_h2h+ curr_patterns*width_h2h + t_x], temp*block_h2h[t_y*BLOCK_SIDE+t_x]*(1-block_h2h[t_y*BLOCK_SIDE+t_x]));//product 
         if(t_y==0){
             for(int j=t_x,index=0; index<BLOCK_SIDE;j+=BLOCK_SIDE, index++ ){
@@ -492,7 +494,6 @@ __device__ void MMMulDevPartialBack(DATA* h2h, DATA* w, DATA* delta, DATA* thr_d
             bias_to_update[t_y*BLOCK_SIDE + t_x] += block_delta[t_y*BLOCK_SIDE + t_x];
     }
     if( (t_y + h2h_corner) < h2h_right_limit && (t_x + delta_corner) < delta_right_limit){
-        thr_delta_W[t_x+t_y*width_delta] = temp_sum_delta_h2h[t_y*BLOCK_SIDE+ t_x];
         delta_weight_dest[t_x+t_y*width_delta] = temp_sum_delta_h2h[t_y*BLOCK_SIDE+ t_x];
     }
     if(enable_bias==1 &&  t_y==0 && (t_x + delta_corner) < delta_right_limit){
@@ -554,12 +555,12 @@ __global__ void MMMulReduction(DATA* W, DATA* BIAS, DATA* DELTA_WEIGHT, DATA* DE
         MMMulReductionBlock(W+b_x+b_y*width_delta, BIAS+ b_x, DELTA_WEIGHT+b_x+b_y*width_delta, DELTA_BIAS+ b_x, DELTA_WEIGHT_DEST, DELTA_BIAS_DEST, offset_weight, offset_bias, width_h2h, width_delta,  Y_right_limit, X_right_limit, enable_bias*(1-blockIdx.y));
     //__syncthreads();
 }
-__global__ void MMMulDevBack(DATA* H2H, DATA* W, DATA* DELTA, DATA* THR_DELTA_W_H2H, DATA* DEST_DELTA,DATA* DELTA_WEIGHT_DEST, DATA* DELTA_BIAS_DEST, int width_h2h, int width_delta, int h2h_right_limit, int delta_right_limit, BOOL enable_bias){
+__global__ void MMMulDevBack(DATA* H2H, DATA* W, DATA* DELTA, DATA* DEST_DELTA, DATA* DELTA_WEIGHT_DEST, DATA* DELTA_BIAS_DEST, int width_h2h, int width_delta, int h2h_right_limit, int delta_right_limit, BOOL enable_bias,int layer){
     int b_x = blockIdx.x*BLOCK_SIDE;
     int b_y = blockIdx.y*BLOCK_SIDE;
     //enable bias vale 1 se la griglia si è spostata lungo la x . Gli unici blocchi che calcoleranno il delta bias sono quelli con blockIdy = 0
     if(b_x < delta_right_limit && b_y <h2h_right_limit)
-        MMMulDevPartialBack(H2H +b_y, W +b_x+b_y*width_delta, DELTA +b_x, THR_DELTA_W_H2H +b_x+b_y*width_delta, DEST_DELTA+b_y, DELTA_WEIGHT_DEST +b_x+b_y*width_delta, DELTA_BIAS_DEST +b_x, width_h2h, width_delta, h2h_right_limit, delta_right_limit, enable_bias*(1-blockIdx.y));
+        MMMulDevPartialBack(H2H +b_y, W +b_x+b_y*width_delta, DELTA +b_x, DEST_DELTA+b_y, DELTA_WEIGHT_DEST +b_x+b_y*width_delta, DELTA_BIAS_DEST +b_x, width_h2h, width_delta, h2h_right_limit, delta_right_limit, enable_bias*(1-blockIdx.y),layer);
     //__syncthreads();
 }
 
@@ -642,7 +643,7 @@ void backpropagation(struct host_to_dev_mem * htdm, struct dev_struct *dev_htdm 
     block.y= BLOCK_SIDE;
 	
 
-	DATA *d_h2h, *d_w, *d_bias, *d_delta_weight, *d_delta_bias, *d_delta, *d_thread_delta, *d_dest_delta, *d_delta_weight_dest, *d_delta_bias_dest;
+	DATA *d_h2h, *d_w, *d_bias, *d_delta_weight, *d_delta_bias, *d_delta, *d_dest_delta, *d_delta_weight_dest, *d_delta_bias_dest;
 	
 	int offset;
 	for(int str=0;str<NSTREAMS;str++){
@@ -662,7 +663,7 @@ void backpropagation(struct host_to_dev_mem * htdm, struct dev_struct *dev_htdm 
 			
 			for(int sw_x=0; sw_x < nupl[l+1]; sw_x += grid.x*BLOCK_SIDE){
 				for(int sw_y=0; sw_y < nupl[l]; sw_y += grid.y*BLOCK_SIDE) {
-						MMMulDevBack<<< grid,block,0,streams[str]>>>(d_h2h +sw_y, d_w +sw_x+sw_y*nupl[l+1], d_delta +sw_x, d_thread_delta+sw_x+sw_y*nupl[l+1], d_dest_delta + sw_y, d_delta_weight_dest + str*nupl[l]*nupl[l+1] +sw_x+sw_y*nupl[l+1], d_delta_bias_dest+ str*nupl[l+1] +sw_x, nupl[l], nupl[l+1], min(nupl[l]-sw_y,grid.y*BLOCK_SIDE) ,min(nupl[l+1]-sw_x,grid.x*BLOCK_SIDE),(1-sw_y));
+					MMMulDevBack<<< grid,block,0,streams[str]>>>(d_h2h +sw_y, d_w +sw_x+sw_y*nupl[l+1], d_delta +sw_x, d_dest_delta + sw_y, d_delta_weight_dest + str*nupl[l]*nupl[l+1] +sw_x+sw_y*nupl[l+1], d_delta_bias_dest+ str*nupl[l+1] +sw_x, nupl[l], nupl[l+1], min(nupl[l]-sw_y,grid.y*BLOCK_SIDE) ,min(nupl[l+1]-sw_x,grid.x*BLOCK_SIDE),(1-sw_y),l);
 				}
 			}		
 		}
@@ -677,7 +678,7 @@ void backpropagation(struct host_to_dev_mem * htdm, struct dev_struct *dev_htdm 
 
 		for(int sw_x=0; sw_x < nupl[1]; sw_x += grid.x*BLOCK_SIDE){
 			for(int sw_y=0; sw_y < nupl[0]; sw_y += grid.y*BLOCK_SIDE) {
-				MMMulDevBack<<< grid,block,0,streams[str]>>>(d_h2h +sw_y, d_w +sw_x+sw_y*nupl[1], d_delta +sw_x, d_thread_delta+sw_x+sw_y*nupl[1], NULL , d_delta_weight_dest + str*nupl[0]*nupl[1] +sw_x+sw_y*nupl[1], d_delta_bias_dest+ str*nupl[1] +sw_x, nupl[0], nupl[1], min(nupl[0]-sw_y,grid.y*BLOCK_SIDE) ,min(nupl[1]-sw_x,grid.x*BLOCK_SIDE),(1-sw_y));
+				MMMulDevBack<<< grid,block,0,streams[str]>>>(d_h2h +sw_y, d_w +sw_x+sw_y*nupl[1], d_delta +sw_x, NULL, d_delta_weight_dest + str*nupl[0]*nupl[1] +sw_x+sw_y*nupl[1], d_delta_bias_dest+ str*nupl[1] +sw_x, nupl[0], nupl[1], min(nupl[0]-sw_y,grid.y*BLOCK_SIDE) ,min(nupl[1]-sw_x,grid.x*BLOCK_SIDE),(1-sw_y),0);
 			}
 		}
 	}
@@ -754,6 +755,29 @@ void MMMulHost(DATA *H2H, DATA *W, DATA *BIAS, DATA *H2H_RES, int row_H2H, int c
 		}
 	}
 }
+void BackMMMulHost(DATA *h2h, DATA * w, DATA * delta, DATA * delta_weight, DATA * delta_bias, DATA * new_delta_weight, DATA * new_delta_bias, DATA * dest_delta, int P,int width_delta,int width_h2h){
+	for(int row=0;row<P;row++){
+        for(int cola=0;cola<width_h2h;cola++){
+            DATA temp= 0.0f;
+            for(int colb=0;colb<width_delta;colb++)
+                temp+= delta[row*width_delta+colb]*w[cola*width_delta+colb];    
+			dest_delta[row*width_h2h+cola] = temp*h2h[row*width_h2h+cola]*(1.0f-h2h[row*width_h2h+cola]);
+        }
+    }
+    for(int colb=0;colb<width_delta;colb++){
+        new_delta_bias[colb] = alpha*delta_bias[colb];
+        for(int cola=0;cola<width_h2h;cola++)
+			new_delta_weight[cola*width_delta+colb] = alpha*delta_weight[cola*width_delta+ colb];
+    }
+    for(int row=0;row<P;row++){
+        for(int colb=0;colb<width_delta;colb++){
+            new_delta_bias[colb] += eta*delta[row*width_delta+colb] ;
+            for(int cola=0;cola<width_h2h;cola++)
+				new_delta_weight[cola*width_delta+colb]+= eta*h2h[row*width_h2h+cola]*delta[row*width_delta+colb];
+        }
+    }
+}
+
 
 /*Check device*/
 BOOL matsAreEquals(DATA *A, DATA *B, int rows, int cols) {
@@ -809,6 +833,8 @@ void HOST_init_struct(struct host_to_dev_mem* htdm, int* nupl, int layers) {
 			for (int j = 0; j < nupl[layer + 1]; j++) {
 				htdm->WeightH2H[htdm->matrix_WB_index[0][layer] + i*nupl[layer + 1] + j] = (DATA)rand() / (DATA)RAND_MAX;
 				htdm->BiasH2H[htdm->matrix_WB_index[1][layer] + j] = (DATA)rand() / (DATA)RAND_MAX;
+				htdm->DeltaWeightH2H[htdm->matrix_WB_index[0][layer] + i*nupl[layer + 1] + j] = (DATA)rand() / (DATA)RAND_MAX;
+				htdm->DeltaBiasH2H[htdm->matrix_WB_index[1][layer] + j] = (DATA)rand() / (DATA)RAND_MAX;
 			}
 		}
 
