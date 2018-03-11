@@ -264,7 +264,7 @@ void BackMMMulHost(DATA *h2h, DATA * w, DATA * delta, DATA * delta_weight, DATA 
 
 int main(){
     DATA *h2h, *w, *bias, *delta, *c_host, *dest_c, *new_delta, *dest_delta, *delta_weight, *new_delta_weight, *delta_bias, *new_delta_bias;
-    DATA *d_h2h, *d_w, *d_bias,*d_delta, *d_thread_delta, *d_dest_delta, *d_delta_weight, *d_delta_bias, *d_delta_weight_dest, *d_delta_bias_dest;
+    DATA *d_h2h, *d_w, *d_bias,*d_delta, *d_dest_delta, *d_delta_weight, *d_delta_bias, *d_delta_weight_dest, *d_delta_bias_dest;
 	
     h2h=(DATA *)malloc(P*M*sizeof(DATA));
     w=(DATA *)malloc(M*N*sizeof(DATA));
@@ -284,7 +284,6 @@ int main(){
     cudaMalloc((void**)&d_bias,N*sizeof(DATA));
     cudaMalloc((void**)&d_delta,P*N*sizeof(DATA));
     cudaMalloc((void**)&d_dest_delta,P*M*sizeof(DATA));
-    cudaMalloc((void**)&d_thread_delta,M*N*sizeof(DATA));
     cudaMalloc((void**)&d_delta_weight,M*N*sizeof(DATA));
     cudaMalloc((void**)&d_delta_bias,N*sizeof(DATA));
     cudaMalloc((void**)&d_delta_weight_dest,NSTREAMS*M*N*sizeof(DATA));
@@ -318,7 +317,6 @@ int main(){
     cudaMemcpy(d_bias,bias,N*sizeof(DATA),cudaMemcpyHostToDevice);
     cudaMemcpy(d_delta,delta,P*N*sizeof(DATA),cudaMemcpyHostToDevice);
     cudaMemcpy(d_dest_delta,new_delta,P*M*sizeof(DATA),cudaMemcpyHostToDevice);
-    cudaMemcpy(d_thread_delta,c_host,M*N*sizeof(DATA),cudaMemcpyHostToDevice);//parte di delta_weight nuovo
     cudaMemcpy(d_delta_weight,delta_weight,M*N*sizeof(DATA),cudaMemcpyHostToDevice);
     cudaMemcpy(d_delta_bias,delta_bias,N*sizeof(DATA),cudaMemcpyHostToDevice);
     //cudaMemcpy(d_delta_weight_dest,new_delta_weight,M*N*sizeof(DATA),cudaMemcpyHostToDevice);
@@ -349,14 +347,9 @@ int main(){
  */
     BackMMMulHost(h2h,w,delta,delta_weight,delta_bias,c_host,new_delta_bias,dest_delta,P,N,M);
 
-
-    
-
-    cudaMemcpy(dest_c,d_thread_delta, M*N*sizeof(DATA),cudaMemcpyDeviceToHost);
     cudaMemcpy(new_delta,d_dest_delta, P*M*sizeof(DATA),cudaMemcpyDeviceToHost);
     cudaMemcpy(delta_bias,d_delta_bias, N*sizeof(DATA),cudaMemcpyDeviceToHost);
     cudaMemcpy(delta_weight,d_delta_weight, M*N*sizeof(DATA),cudaMemcpyDeviceToHost);
-
 
     printf(" delta W-h2h : \n");
     matsAreEquals(delta_weight,c_host,M,N);
@@ -393,7 +386,6 @@ int main(){
     cudaFree(d_h2h);
     cudaFree(d_w);
     cudaFree(d_delta);
-    cudaFree(d_thread_delta);
     cudaFree(d_dest_delta);
     return 0;
 }
