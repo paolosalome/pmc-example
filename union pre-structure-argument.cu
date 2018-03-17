@@ -249,9 +249,9 @@ int main(void) {
 	printf("Reduced Error: %f\n", *ERROR);
 	
 	
-	//HANDLE_CUDA(cudaMemcpy(ERROR_MAT, DEV_ERROR_MAT, TOTAL_PATT*NEURO_OUTPUT * sizeof(DATA), cudaMemcpyDeviceToHost));
+	HANDLE_CUDA(cudaMemcpy(ERROR_MAT, DEV_ERROR_MAT, TOTAL_PATT*NEURO_OUTPUT * sizeof(DATA), cudaMemcpyDeviceToHost));
 	
-	HANDLE_CUDA(cudaMemcpy(ERROR_MAT, dev_htdm->Delta+ htdm->matrix_DELTA_index[0][TOTAL_LAYER-2], TOTAL_PATT*NEURO_OUTPUT * sizeof(DATA), cudaMemcpyDeviceToHost));
+	//HANDLE_CUDA(cudaMemcpy(ERROR_MAT, dev_htdm->Delta+ htdm->matrix_DELTA_index[0][TOTAL_LAYER-2], TOTAL_PATT*NEURO_OUTPUT * sizeof(DATA), cudaMemcpyDeviceToHost));
 	//printMat(ERROR_MAT, TOTAL_PATT, NEURO_OUTPUT);
 	DATA red_host = errorReductionHost(ERROR_MAT, TOTAL_PATT, NEURO_OUTPUT);
 	printf("host reduction error : %f\n", red_host);
@@ -704,12 +704,11 @@ void backpropagation(struct host_to_dev_mem * htdm, struct dev_struct *dev_htdm 
 			}
 		}
 	}
-	//HANDLE_CUDA(cudaMemcpy( htdm, dev_htdm, (2*(GLOBAL_W_SIZE+GLOBAL_BIAS_SIZE)+GLOBAL_DELTA_SIZE)*sizeof(DATA), cudaMemcpyDeviceToHost));
-	HANDLE_CUDA(cudaMemcpy( htdm->DeltaWeightH2H , dev_htdm->DeltaWeightH2H, GLOBAL_W_SIZE*sizeof(DATA), cudaMemcpyDeviceToHost));
-	HANDLE_CUDA(cudaMemcpy( htdm->DeltaBiasH2H, dev_htdm->DeltaBiasH2H, (GLOBAL_BIAS_SIZE)*sizeof(DATA), cudaMemcpyDeviceToHost));
+	
+	/* error check */	
 	HANDLE_CUDA(cudaMemcpy( htdm->Delta, dev_htdm->Delta, (GLOBAL_DELTA_SIZE - TOTAL_PATT*nupl[3] )*sizeof(DATA), cudaMemcpyDeviceToHost));
 	HANDLE_CUDA(cudaMemcpy(htdm->H2H + TOTAL_PATT*nupl[0], dev_htdm->H2H + TOTAL_PATT*nupl[0], TOTAL_PATT*(nupl[1]+nupl[2]+nupl[3])*sizeof(DATA), cudaMemcpyDeviceToHost));
-	/* error check */	
+
 	/*  delta_w,			delta_b e 		dest_delta 		HOST
 		new_delta_weight	new_delta_bias		new_delta		DEVICE
 	*/
@@ -752,8 +751,10 @@ void backpropagation(struct host_to_dev_mem * htdm, struct dev_struct *dev_htdm 
 		matsAreEquals(new_delta_weight,delta_w,nupl[l],nupl[l+1]);
 
 		printf("delta bias : 1*%d: \n",nupl[l+1]);
-		matsAreEquals(new_delta_bias,delta_bias,1,nupl[l+1]);
+		matsAreEquals(new_delta_bias,delta_b,1,nupl[l+1]);
 	}
+	HANDLE_CUDA(cudaMemcpy( htdm->DeltaWeightH2H , dev_htdm->DeltaWeightH2H, GLOBAL_W_SIZE*sizeof(DATA), cudaMemcpyDeviceToHost));
+	HANDLE_CUDA(cudaMemcpy( htdm->DeltaBiasH2H, dev_htdm->DeltaBiasH2H, (GLOBAL_BIAS_SIZE)*sizeof(DATA), cudaMemcpyDeviceToHost));
 	/* -----end check error------*/
 }
 
