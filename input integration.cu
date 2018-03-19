@@ -9,7 +9,6 @@
 #define DATA float
 #define BOOL int
 #define MAX_ERR 1e-2
-
 //Grid features
 
 #define OPTIMUM_BLOCK_NUM 14 
@@ -134,7 +133,7 @@ BOOL matsAreEquals(DATA *, DATA *, int, int);
 DATA errorReductionHost(DATA *, int, int);
 
 /*HOST ALLOCATION AND INITIALIZATION*/
-void HOST_init_struct( DATA* , DATA* , DATA* , DATA* , DATA* , DATA* , int*, int*, int* , int* , int* , int , int );
+void HOST_init_struct( DATA* , DATA* , DATA* , DATA* , DATA* , DATA* , int*, int*, int* , int* , int* , int , int , DATA);
 
 /*----------------------------------------------------------------------MAIN---------------------------------------------------------------------------*/
 
@@ -194,7 +193,7 @@ int main(void) {
 
 	for (int i = 0; i < NumPattern; i++) {
 		for (int j = 0; j < NumOutput; j++) {
-			TARGET[i*NumOutput + j] = (DATA)rand() / (DATA)RAND_MAX;
+			TARGET[i*NumOutput + j] = (DATA) 2.0 * ( (DATA)drand48() - (DATA)0.5 ) * (DATA)0.2;//(DATA)rand() / (DATA)RAND_MAX;
 		}
 	}
 
@@ -205,7 +204,7 @@ int main(void) {
 	for (int i = 0; i < NumPattern; i++) {
 		for (int j = 0; j < NumInput; j++) {
 			//r= rand() / (DATA)RAND_MAX;
-			INPUT_MAT[i*NumInput + j] = (DATA)rand() / (DATA)RAND_MAX;
+			INPUT_MAT[i*NumInput + j] = (DATA) 2.0 * ( (DATA)drand48() - (DATA)0.5 ) * (DATA)0.2;////(DATA)rand() / (DATA)RAND_MAX;
 			//htdm->H2H[i*NumInput+ j] = r;
 		}
 	}
@@ -230,7 +229,7 @@ int main(void) {
 	DATA* WeightH2H, *BiasH2H, *DeltaWeightH2H, *DeltaBiasH2H, *Delta, *H2H, *TempDeltaWeightH2H, *TempDeltaBiasH2H;
 
 	//Init weights and biases on host
-	HOST_init_struct(H_WeightH2H, H_BiasH2H, H_DeltaWeightH2H, H_DeltaBiasH2H, H_Delta, H_H2H,	H_matrix_W_index, H_matrix_B_index, H_matrix_DELTA_index, H_matrix_H2H_index, nupl, TOTAL_LAYER, NumPattern);
+	HOST_init_struct(H_WeightH2H, H_BiasH2H, H_DeltaWeightH2H, H_DeltaBiasH2H, H_Delta, H_H2H,	H_matrix_W_index, H_matrix_B_index, H_matrix_DELTA_index, H_matrix_H2H_index, nupl, TOTAL_LAYER, NumPattern, 0.2f);
 	//Malloc the necessary space on device memory
 	HANDLE_CUDA(cudaMalloc((void **)&WeightH2H , GLOBAL_W_SIZE * sizeof(DATA)));
 	HANDLE_CUDA(cudaMalloc((void **)&BiasH2H, GLOBAL_BIAS_SIZE * sizeof(DATA)));
@@ -290,8 +289,6 @@ int main(void) {
 		/*++++-----------------------------------BACKPROPAGATION-------------------------------------------++++*/
 
 		startTimer(&start, &stop);
-
-		//backpropagation(htdm, dev_htdm , nupl, TOTAL_LAYER, streams);
 		backpropagation(H_WeightH2H, H_BiasH2H, H_DeltaWeightH2H, H_DeltaBiasH2H, H_Delta, H_H2H, H_matrix_W_index, H_matrix_B_index, H_matrix_DELTA_index, H_matrix_H2H_index,
 			WeightH2H, BiasH2H, DeltaWeightH2H, DeltaBiasH2H, Delta, H2H, TempDeltaWeightH2H, TempDeltaBiasH2H, 
 			nupl, TOTAL_LAYER, streams, GLOBAL_BIAS_SIZE , GLOBAL_W_SIZE, GLOBAL_DELTA_SIZE, NSTREAMS, STREAMSIZE, NumPattern, eta, alpha);
@@ -521,8 +518,7 @@ __device__ void MMMulDevPartialBack(DATA* h2h, DATA* w, DATA* delta, DATA* dest_
 		for(int i=0 ;i<BLOCK_SIDE;i++){
 			if(layer>0)
             	temp += block_delta[t_y*BLOCK_SIDE+i]*block_w[i*BLOCK_SIDE+t_x];//product delta*W by trd[ty][tx]
-            //temp_shifted_mul[t_y][ t_x + i*BLOCK_SIDE ] =  val*block_h2h[t_y*BLOCK_SIDE+i];
-			temp_shifted_mul[t_y][ t_x*BLOCK_SIDE+ i ] =  val*block_h2h[t_y*BLOCK_SIDE+i];
+            temp_shifted_mul[t_y][ t_x + i*BLOCK_SIDE ] =  val*block_h2h[t_y*BLOCK_SIDE+i];
         }    
 
         if(layer > 0 && t_y < pattern)
@@ -763,9 +759,10 @@ void backpropagation(DATA* H_WeightH2H, DATA* H_BiasH2H, DATA* H_DeltaWeightH2H,
 
 
 	/*----check error------*/
- 	/*
+ 	
 	HANDLE_CUDA(cudaMemcpy( H_Delta, Delta, (GLOBAL_DELTA_SIZE - NumPattern*nupl[3] )*sizeof(DATA), cudaMemcpyDeviceToHost));
-	HANDLE_CUDA(cudaMemcpy(H_H2H + NumPattern*nupl[0], H2H + NumPattern*nupl[0], NumPattern*(nupl[1]+nupl[2]+nupl[3])*sizeof(DATA), cudaMemcpyDeviceToHost));
+	//HANDLE_CUDA(cudaMemcpy(H_H2H + NumPattern*nupl[0], H2H + NumPattern*nupl[0], NumPattern*(nupl[1]+nupl[2]+nupl[3])*sizeof(DATA), cudaMemcpyDeviceToHost));
+	HANDLE_CUDA(cudaMemcpy(H_H2H, H2H, NumPattern*(nupl[1]+nupl[2]+nupl[3]+nupl[0])*sizeof(DATA), cudaMemcpyDeviceToHost));
 	
 	DATA *delta_w,*delta_b,*new_delta_weight,*new_delta_bias,*old_delta,*new_delta,*dest_delta;
 	
@@ -810,7 +807,7 @@ void backpropagation(DATA* H_WeightH2H, DATA* H_BiasH2H, DATA* H_DeltaWeightH2H,
 	}
 	HANDLE_CUDA(cudaMemcpy( H_DeltaWeightH2H , DeltaWeightH2H, GLOBAL_W_SIZE*sizeof(DATA), cudaMemcpyDeviceToHost));
 	HANDLE_CUDA(cudaMemcpy( H_DeltaBiasH2H, DeltaBiasH2H, (GLOBAL_BIAS_SIZE)*sizeof(DATA), cudaMemcpyDeviceToHost));
-	 */
+	 
 	/* -----end check error------*/
 	
 }
@@ -923,7 +920,7 @@ DATA errorReductionHost(DATA *error_mat, int rows, int cols) {
 /*ALLOCATION FUNCTIONS*/
 
 /*init struct on host*/
-void HOST_init_struct( DATA* WeightH2H, DATA* BiasH2H, DATA* DeltaWeightH2H, DATA* DeltaBiasH2H, DATA* Delta, DATA* H2H,	int* matrix_W_index, int* matrix_B_index,  int* matrix_DELTA_index, int* matrix_H2H_index, int* nupl, int layers, int NumPattern) {
+void HOST_init_struct( DATA* WeightH2H, DATA* BiasH2H, DATA* DeltaWeightH2H, DATA* DeltaBiasH2H, DATA* Delta, DATA* H2H,	int* matrix_W_index, int* matrix_B_index,  int* matrix_DELTA_index, int* matrix_H2H_index, int* nupl, int layers, int NumPattern, DATA smallwt) {
 		
 	int prev_sum[4];
 	matrix_H2H_index[0] = 0;
@@ -945,25 +942,27 @@ void HOST_init_struct( DATA* WeightH2H, DATA* BiasH2H, DATA* DeltaWeightH2H, DAT
 		matrix_W_index[layer] = nupl[layer - 1] * nupl[layer] + prev_sum[2];
 		matrix_B_index[layer] = nupl[layer] + prev_sum[3];
 
-		for (int i = 0; i < nupl[layer]; i++) {
-			for (int j = 0; j < nupl[layer + 1]; j++) {
-				WeightH2H[matrix_W_index[layer] + i*nupl[layer + 1] + j] = (DATA)rand() / (DATA)RAND_MAX;
-				BiasH2H[matrix_B_index[layer] + j] = (DATA)rand() / (DATA)RAND_MAX;
-				DeltaWeightH2H[matrix_W_index[layer] + i*nupl[layer + 1] + j] = (DATA)rand() / (DATA)RAND_MAX;
-				DeltaBiasH2H[matrix_B_index[layer] + j] = (DATA)rand() / (DATA)RAND_MAX;
+	for (int j = 0; j < nupl[layer + 1]; j++) {
+      	BiasH2H[matrix_B_index[layer] + j] = (DATA) 2.0 * ( (DATA)drand48() -(DATA) 0.5 ) * (DATA)smallwt ;//(DATA)rand() / (DATA)RAND_MAX;
+		DeltaBiasH2H[matrix_B_index[layer] + j] = (DATA)0.0;
+      for (int i = 0; i < nupl[layer]; i++) {
+				WeightH2H[matrix_W_index[layer] + i*nupl[layer + 1] + j] = (DATA) 2.0 * ( (DATA)drand48() - (DATA)0.5 ) * (DATA)smallwt ;//(DATA)rand() / (DATA)RAND_MAX;
+				DeltaWeightH2H[matrix_W_index[layer] + i*nupl[layer + 1] + j] = (DATA)0.0;
 			}
 		}
-
+    
 	}
 	prev_sum[0] = matrix_H2H_index[layers - 2];
 	matrix_H2H_index[layers - 1] = nupl[layers - 2] * NumPattern + prev_sum[0];
 
-	for (int i = 0; i < nupl[0]; i++) {
-		for (int j = 0; j < nupl[1]; j++) {
-			WeightH2H[i*nupl[1] + j] = (DATA)rand() / (DATA)RAND_MAX;
-			BiasH2H[j] = (DATA)rand() / (DATA)RAND_MAX;
+	for (int j = 0; j < nupl[1]; j++) {
+		BiasH2H[j] = (DATA) 2.0 * ( (DATA)drand48() - (DATA)0.5 ) * (DATA)smallwt ;//(DATA)rand() / (DATA)RAND_MAX;
+		DeltaBiasH2H[j] = (DATA)0.0;
+		for (int i = 0; i < nupl[0]; i++) {
+				WeightH2H[i*nupl[1] + j] = (DATA) 2.0 * ( (DATA)drand48() - (DATA)0.5 ) * (DATA)smallwt ; //(DATA)rand() / (DATA)RAND_MAX;
+				DeltaWeightH2H[i*nupl[1] + j] = (DATA)0.0;
 		}
-	}
+  	}
 }
 
 //NON CANCELLARE !!! INSERIRE NEL FEEDFORWARD PER FARE TEST DI CORRETTEZZA NEL PUNTO **HERE**!!!
