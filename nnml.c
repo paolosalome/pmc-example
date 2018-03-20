@@ -361,7 +361,7 @@ int main(int argc, char *argv[]) {
         for( k = 0 ; k < nupl[NumHL+1] ; k ++ ) {
                 fscanf(fp,formatstring,&H_BiasH2H[H_matrix_B_index[TOTAL_LAYER-2]+k]);//WeightHO[0][k]);
                 if(fpd) fscanf(fpd,formatstring,&DeltaBiasH2H[H_matrix_B_index[TOTAL_LAYER-2]+k]);//DeltaWeightHO[0][k]);
-                for( j = 1 ; j < nupl[NumHL] ; j++ ) {
+                for( j = 0 ; j < nupl[NumHL] ; j++ ) {
                     fscanf(fp,formatstring,&H_WeightH2H[H_matrix_W_index[TOTAL_LAYER-2] + j*nupl[NumHL+1]+k]);//WeightHO[j][k]);
                     if(fpd) fscanf(fpd,formatstring,&H_DeltaWeightH2H[H_matrix_W_index[TOTAL_LAYER-2] + j*nupl[NumHL+1]+k]);//DeltaWeightHO[j][k]);
                 }
@@ -468,35 +468,35 @@ int main(int argc, char *argv[]) {
     }
     fp=Fopen(ResultFileName,"w");
     fpd=Fopen(DeltaFileName,"w");
-    for( k = 1 ; k <= NumOutput ; k ++ ) {
+    for( k = 0 ; k < NumOutput ; k ++ ) {
       if(verbose) {
-        printf("Bias H to O[%d]: %f\n",k,WeightHO[0][k]);
+        printf("Bias H to O[%d]: %f\n",k,H_BiasH2H[H_matrix_B_index[TOTAL_LAYER-2]+k]);//WeightHO[0][k]);
       }
-      fprintf(fp,"%7.5f ",WeightHO[0][k]);
-      fprintf(fpd,"%g ",DeltaWeightHO[0][k]);
-      for( j = 1 ; j <= nupl[NumHL] ; j++ ) {
+      fprintf(fp,"%7.5f ",H_BiasH2H[H_matrix_B_index[TOTAL_LAYER-2]+k]);//WeightHO[0][k]);
+      fprintf(fpd,"%g ",H_DeltaBiasH2H[H_matrix_B_index[TOTAL_LAYER-2]+k]);//DeltaWeightHO[0][k]);
+      for( j = 0 ; j < nupl[NumHL] ; j++ ) {
         if(verbose) {
-          printf("Weight H[%d] to O[%d]: %f\n",j,k,WeightHO[j][k]);
+          printf("Weight H[%d] to O[%d]: %f\n",j,k, H_WeightH2H[H_matrix_W_index[TOTAL_LAYER-2]+ j*nupl[NumHL]+k] );//WeightHO[j][k]);
         }
-        fprintf(fp,"%7.5f ",WeightHO[j][k]);
-        fprintf(fpd,"%g ",DeltaWeightHO[j][k]);
+        fprintf(fp,"%7.5f ", H_WeightH2H[H_matrix_W_index[TOTAL_LAYER-2]+ j*nupl[NumHL]+k]);//WeightHO[j][k]);
+        fprintf(fpd,"%g ", H_DeltaWeightH2H[H_matrix_W_index[TOTAL_LAYER-2] +j*nupl[NumHL]+k]);//DeltaWeightHO[j][k]);
       }
       fprintf(fp,"\n");
       fprintf(fpd,"\n");
     }
     for(h=NumHL; h>0; h--) {
-      for( j = 1 ; j <= nupl[h] ; j++ ) {
+      for( j = 0 ; j < nupl[h] ; j++ ) {   
         if(verbose) {
-          printf("BiasH2H[%d][%d]: %f\n",h,j,WeightH2H[h-1][0][j]);
+          printf("BiasH2H[%d][%d]: %f\n",h,j, H_BiasH2H[H_matrix_B_index[h-1] +j ]);// WeightH2H[h-1][0][j]);
         }
-        fprintf(fp,"%7.5f ",WeightH2H[h-1][0][j]);
-        fprintf(fpd,"%g ",DeltaWeightH2H[h-1][0][j]);
-        for( i = 1 ; i <= nupl[h-1] ; i++ ) {
+        fprintf(fp,"%7.5f ",H_BiasH2H[H_matrix_B_index[h-1] + j]);//WeightH2H[h-1][0][j]);
+        fprintf(fpd,"%g ", H_DeltaBiasH2H[H_matrix_B_index[h-1] + j]);//DeltaWeightH2H[h-1][0][j]);
+        for( i = 0 ; i < nupl[h-1] ; i++ ) {
           if(verbose) {
-            printf("WeightH2H[%d][%d] to H{%d]: %f\n",h,i,j,WeightH2H[h-1][i][j]);
+            printf("WeightH2H[%d][%d] to H{%d]: %f\n",h,i,j, H_WeightH2H[H_matrix_W_index[h-1]+i*nupl[h]+j]);//WeightH2H[h-1][i][j]  );
           }
-          fprintf(fp,"%7.5f ",WeightH2H[h-1][i][j]);
-          fprintf(fpd,"%g ",DeltaWeightH2H[h-1][i][j]);
+          fprintf(fp,"%7.5f ", H_WeightH2H[H_matrix_W_index[h-1]+i*nupl[h]+j]);//WeightH2H[h-1][i][j]);
+          fprintf(fpd,"%g ", H_DeltaWeightH2H[H_matrix_W_index[h-1]+i*nupl[h]+j]);//DeltaWeightH2H[h-1][i][j]);
         }
         fprintf(fp,"\n");
         fprintf(fpd,"\n");
