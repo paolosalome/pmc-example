@@ -114,7 +114,20 @@ void ReadFromFileArr(char *fn,void *array,int nrow, int ncol, int ts) {
   fclose(fp);
 }
 
-void HOST_init_struct( REAL* WeightH2H, REAL* BiasH2H, REAL* DeltaWeightH2H, REAL* DeltaBiasH2H, REAL* Delta, REAL* H2H,	int* matrix_W_index, int* matrix_B_index,  int* matrix_DELTA_index, int* matrix_H2H_index, int* nupl, int layers, int NumPattern, int smallwt) {
+void printMat(REAL *mat, int rows, int cols) {
+
+	for (int i = 0; i < rows; i++) {
+		printf("ROW %d : {", i);
+		for (int j = 0; j < cols; j++) {
+			printf("%f - ", mat[i*cols + j]);
+		}
+		printf("}");
+		printf("\n\n");
+	}
+	printf("\n\n");
+}
+
+void HOST_init_struct( REAL* WeightH2H, REAL* BiasH2H, REAL* DeltaWeightH2H, REAL* DeltaBiasH2H, REAL* Delta,	int* matrix_W_index, int* matrix_B_index,  int* matrix_DELTA_index, int* matrix_H2H_index, int* nupl, int layers, int NumPattern, int smallwt) {
 		
 	int prev_sum[4];
 	matrix_H2H_index[0] = 0;
@@ -212,7 +225,7 @@ __global__ void deviceReduceBlockAtomicKernel(REAL *, REAL*, int);
 
 /*MMMul(for feedforward)*/
 __device__ void MMMulDevPartialFeed(REAL *, REAL *, REAL *, REAL *, REAL*, REAL *, unsigned int, unsigned int, unsigned int, unsigned int, int);
-__global__ void MMMulDevFeed(REAL *, REAL *, REAL *, REAL *, REAL *, REAL*, unsigned int, unsigned int, unsigned int, unsigned int, int, int);
+__global__ void MMMulDevFeed(REAL *, REAL *, REAL *, REAL *, REAL *, REAL*, unsigned int, unsigned int, unsigned int, int, int);
 
 /* MMMul backprog*/
 __device__ void MMMulDevPartialBack(REAL* , REAL* , REAL* , REAL* , REAL* , REAL* , int , int , int , int , BOOL, int, int, REAL);
@@ -393,7 +406,7 @@ int main(int argc, char *argv[]) {
     int H_matrix_H2H_index[TOTAL_LAYER];//INDEX for padding in H2H
 
     //Init weights and biases on host
-    HOST_init_struct(H_WeightH2H, H_BiasH2H, H_DeltaWeightH2H, H_DeltaBiasH2H, H_Delta, H_H2H,	H_matrix_W_index, H_matrix_B_index, H_matrix_DELTA_index, H_matrix_H2H_index, nupl, TOTAL_LAYER, NumPattern, smallwt);
+    HOST_init_struct(H_WeightH2H, H_BiasH2H, H_DeltaWeightH2H, H_DeltaBiasH2H, H_Delta, H_matrix_W_index, H_matrix_B_index, H_matrix_DELTA_index, H_matrix_H2H_index, nupl, TOTAL_LAYER, NumPattern, smallwt);
     //    DEVICE    Malloc the necessary space on device memory
     HANDLE_CUDA(cudaMalloc((void **)&WeightH2H , GLOBAL_W_SIZE * sizeof(REAL)));
     HANDLE_CUDA(cudaMalloc((void **)&BiasH2H, GLOBAL_BIAS_SIZE * sizeof(REAL)));
@@ -437,7 +450,7 @@ int main(int argc, char *argv[]) {
           
                 fscanf(fp,formatstring,&H_BiasH2H[H_matrix_B_index[TOTAL_LAYER-2]+k]);//WeightHO[0][k]);
                 if(fpd)
-                  fscanf(fp,formatstring,&H_DeltaBiasH2H[H_matrix_B_index[TOTAL_LAYER-2]+k]);//WeightHO[0][k]);
+                  fscanf(fpd,formatstring,&H_DeltaBiasH2H[H_matrix_B_index[TOTAL_LAYER-2]+k]);//WeightHO[0][k]);
                 
                 for( j = 0 ; j < nupl[NumHL] ; j++ ) {
 
@@ -465,6 +478,13 @@ int main(int argc, char *argv[]) {
         if (fp) fclose(fp);
         if (fpd) fclose(fpd);
     }
+    //printMat(INPUT_MAT,NumPattern,NumInput);
+  for(h=NumHL;h>=0;h--){
+    printMat(&H_BiasH2H[H_matrix_B_index[h]],1,nupl[h+1]);
+    printMat(&H_DeltaBiasH2H[H_matrix_B_index[h]],1,nupl[h+1]);
+    printMat(&H_WeightH2H[H_matrix_W_index[h]],nupl[h],nupl[h+1]);
+    printMat(&H_DeltaWeightH2H[H_matrix_W_index[h]],nupl[h],nupl[h+1]);
+  }
     if(verbose) {
       printf("\nInitial Bias and Weights\n");
       for( k = 0 ; k <  nupl[NumHL+1] ; k ++ ) {
@@ -734,7 +754,7 @@ __device__ void MMMulDevPartialFeed(REAL *h2h, REAL *w, REAL *biases, REAL *h2h_
 
 		min = (current_inc < block_dim) ? (current_inc) : (block_dim);
 
-		#pragma unroll(2)
+		//#pragma unroll(2)
 		for (int k = 0; k < min; k++) {
 			partial += shared_h2h[ty][k] * shared_w[k][tx];
 		}
@@ -745,7 +765,7 @@ __device__ void MMMulDevPartialFeed(REAL *h2h, REAL *w, REAL *biases, REAL *h2h_
 	//Attenzione alla divergenza dei threads (vedi CCC pag.137)
 	if (dest_x < col_w && dest_y < num_pattern) {
 
-		REAL out = (REAL)1.0 / (REAL)(1.0 + exp(-(partial + biases[dest_x])));
+		REAL out = 1.0 / (1.0 + exp(-(partial + biases[dest_x])));
 		h2h_dest[dest_y*col_w + dest_x] = out; //SIGMA
 
 		//Se siamo nell'ultimo passo
@@ -755,11 +775,11 @@ __device__ void MMMulDevPartialFeed(REAL *h2h, REAL *w, REAL *biases, REAL *h2h_
 
 			//Scrivi nella posizione corrispondente della matrice di ERRORE
 			/*0.5*(Target[p][k] - Output[p][k])*(Target[p][k] - Output[p][k])*/
-			error[dest_y*col_w + dest_x] = 0.5*(target - out)*(target - out);
+			error[dest_y*col_w + dest_x] =  (REAL)0.5*(target - out)*(target - out);
 
 			//Scrivi nella posizione corrispondente della matrice DELTA
 			/*(Target[p][k] - Output[p][k]) * Output[p][k] * (1.0 - Output[p][k])*/
-			delta[dest_y*col_w + dest_x] = (target - out)*(out)*(1.0- out);
+			delta[dest_y*col_w + dest_x] = (REAL)(target - out)*(out)*(1.0- out);
 		}
 	}
 }
@@ -771,9 +791,10 @@ pattern mancanti.
 stream_offset_y � la posizione lungo le y da cui parte (nelle matrici h2h e h2h_dest) lo stream corrente.
 */
 //Dove ora c'� STREAMSIZE prima c'era NumPattern
-__global__ void MMMulDevFeed(REAL *h2h, REAL *w, REAL *biases, REAL *h2h_dest, REAL *delta, REAL *error, unsigned int row_w, unsigned int col_w, unsigned int patt_per_step, unsigned int stream_offset_y,
+__global__ void MMMulDevFeed(REAL *h2h, REAL *w, REAL *biases, REAL *h2h_dest, REAL *delta, REAL *error, unsigned int row_w, unsigned int col_w, unsigned int stream_offset_y,
 						int STREAMSIZE, int NumOutput) {
 
+  unsigned int patt_per_step = gridDim.y*blockDim.y;
 	unsigned int current_patts;
 	unsigned int remaining_patts;
 	const int pos_block_y = blockIdx.y*blockDim.x; //Posizione del blocco corrente rispetto alla griglia lungo le y
@@ -837,7 +858,7 @@ __device__ void MMMulDevPartialBack(REAL* h2h, REAL* w, REAL* delta, REAL* dest_
     }    
 
     if(layer > 0 && t_y < pattern)
-      atomicAdd(&dest_delta[t_y*width_h2h+ curr_patterns*width_h2h + t_x], temp*block_h2h[t_y*BLOCK_SIDE+t_x]*(1-block_h2h[t_y*BLOCK_SIDE+t_x]));//product 
+      atomicAdd(&dest_delta[t_y*width_h2h+ curr_patterns*width_h2h + t_x], temp*block_h2h[t_y*BLOCK_SIDE+t_x]*(1.0-block_h2h[t_y*BLOCK_SIDE+t_x]));//product 
 
     for(int j=t_x,index=0; index<BLOCK_SIDE;j+=BLOCK_SIDE, index++ ){
 			if(t_y<pattern)
@@ -933,7 +954,6 @@ void feedforward (REAL *INPUT,
 
 	//Grid setting
 	dim3 grid, block;
-	unsigned int patt_per_step;
 	//Useful pointers
 	REAL *h2h, *w, *bias, *h2h_dest, *delta, *error;
 
@@ -941,8 +961,7 @@ void feedforward (REAL *INPUT,
 	int offset;
 
 	//startTimer(&start, &stop);
-	if (first_epoch) {//il fattore 2 tiene conto anche dei delta utili sucessivamente nella fase di backpropagation
-		//HANDLE_CUDA(cudaMemcpy(dev_htdm, htdm, 2*(GLOBAL_BIAS_SIZE + GLOBAL_W_SIZE) * sizeof(REAL), cudaMemcpyHostToDevice));
+	if (first_epoch == 1) {
 		HANDLE_CUDA(cudaMemcpy(WeightH2H, H_WeightH2H, GLOBAL_W_SIZE * sizeof(REAL), cudaMemcpyHostToDevice));
 		HANDLE_CUDA(cudaMemcpy(BiasH2H, H_BiasH2H, GLOBAL_BIAS_SIZE * sizeof(REAL), cudaMemcpyHostToDevice));
 		HANDLE_CUDA(cudaMemcpy(DeltaWeightH2H, H_DeltaWeightH2H, GLOBAL_W_SIZE * sizeof(REAL), cudaMemcpyHostToDevice));
@@ -959,8 +978,6 @@ void feedforward (REAL *INPUT,
 		grid.x = (nupl[1] + block.x - 1) / block.x;
 		grid.y = gs.grid[0] / grid.x;
 
-		patt_per_step = grid.y * block.y;
-
 		offset = i*STREAMSIZE;
 		//Set pointers
 		h2h = H2H + offset*nupl[0];
@@ -971,11 +988,11 @@ void feedforward (REAL *INPUT,
 		error = dev_error_mat + offset*nupl[layers - 1];
 		//Pointers set up
 
-		if (first_epoch) {
+		if (first_epoch == 1) {
 			HANDLE_CUDA(cudaMemcpyAsync(h2h, INPUT + offset*nupl[0], nupl[0] * STREAMSIZE * sizeof(REAL), cudaMemcpyHostToDevice, streams[i]));
 		}
 
-		MMMulDevFeed << <grid, block, 0, streams[i] >> > (h2h, w, bias, h2h_dest, delta, error, nupl[0], nupl[1], patt_per_step, offset, STREAMSIZE, nupl[layers-1]);
+		MMMulDevFeed << <grid, block, 0, streams[i] >> > (h2h, w, bias, h2h_dest, delta, error, nupl[0], nupl[1], offset, STREAMSIZE, nupl[layers-1]);
 
 		for (int l = 1; l < (layers - 1); l++) {
 
@@ -984,7 +1001,6 @@ void feedforward (REAL *INPUT,
 			grid.x = (nupl[l + 1] + block.x - 1) / block.x;
 			grid.y = gs.grid[l] / grid.x;
 
-			patt_per_step = grid.y * block.y;
 			//Set pointers
 			h2h = H2H + H_matrix_H2H_index[l] + offset*nupl[l];
 			w = WeightH2H + H_matrix_W_index[l];
@@ -993,7 +1009,7 @@ void feedforward (REAL *INPUT,
 			//Delta and error already set up
 			//Pointers set up
 
-			MMMulDevFeed << <grid, block, 0, streams[i] >> > (h2h, w, bias, h2h_dest, delta, error, nupl[l], nupl[l + 1], patt_per_step, offset, STREAMSIZE, nupl[layers-1]);
+			MMMulDevFeed << <grid, block, 0, streams[i] >> > (h2h, w, bias, h2h_dest, delta, error, nupl[l], nupl[l + 1], offset, STREAMSIZE, nupl[layers-1]);
 		}
 	}
 	//Error reduction (default stream)
