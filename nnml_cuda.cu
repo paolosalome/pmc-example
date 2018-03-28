@@ -479,12 +479,12 @@ int main(int argc, char *argv[]) {
         if (fpd) fclose(fpd);
     }
     //printMat(INPUT_MAT,NumPattern,NumInput);
-  for(h=NumHL;h>=0;h--){
+/*   for(h=NumHL;h>=0;h--){
     printMat(&H_BiasH2H[H_matrix_B_index[h]],1,nupl[h+1]);
     printMat(&H_DeltaBiasH2H[H_matrix_B_index[h]],1,nupl[h+1]);
     printMat(&H_WeightH2H[H_matrix_W_index[h]],nupl[h],nupl[h+1]);
     printMat(&H_DeltaWeightH2H[H_matrix_W_index[h]],nupl[h],nupl[h+1]);
-  }
+  } */
     if(verbose) {
       printf("\nInitial Bias and Weights\n");
       for( k = 0 ; k <  nupl[NumHL+1] ; k ++ ) {
@@ -520,7 +520,6 @@ int main(int argc, char *argv[]) {
       stopAndPrint(&start, &stop);
       
       HANDLE_CUDA(cudaMemcpy(ERROR, DEV_ERROR, sizeof(REAL), cudaMemcpyDeviceToHost));
-      printf("Reduced Error: %f\n", *ERROR);	
       /*-------------------------------------END---FEEDFORWARD-------------------------------------------*/
       /*++++-----------------------------------BACKPROPAGATION-------------------------------------------++++*/
 
@@ -737,7 +736,6 @@ __device__ void MMMulDevPartialFeed(REAL *h2h, REAL *w, REAL *biases, REAL *h2h_
 
 		block_r_border += block_dim;
 
-		//__shared__ REAL shared_w[BLOCK_SIDE_FIRST_LAYER][BLOCK_SIDE_FIRST_LAYER+1]; Non possiamo ancora giustificare il miglioramento nei tempi.
 		__shared__ REAL shared_w[BLOCK_SIDE_FIRST_LAYER][BLOCK_SIDE_FIRST_LAYER];
 		__shared__ REAL shared_h2h[BLOCK_SIDE_FIRST_LAYER][BLOCK_SIDE_FIRST_LAYER];
 
@@ -825,7 +823,7 @@ __device__ void MMMulDevPartialBack(REAL* h2h, REAL* w, REAL* delta, REAL* dest_
   int h2h_corner = blockIdx.y*BLOCK_SIDE;
   int delta_corner = blockIdx.x*BLOCK_SIDE;
 
-  __shared__ REAL temp_shifted_mul[BLOCK_SIDE][BLOCK_SIDE*BLOCK_SIDE];//può contenere diversi 0 nei casi sui bordi
+  //__shared__ REAL temp_shifted_mul[BLOCK_SIDE][BLOCK_SIDE*BLOCK_SIDE];//può contenere diversi 0 nei casi sui bordi
   __shared__ REAL temp_sum_delta_h2h[BLOCK_SIDE*BLOCK_SIDE];//può essere riciclato per W
   __shared__ REAL block_h2h[BLOCK_SIDE*BLOCK_SIDE];
   __shared__ REAL block_w[BLOCK_SIDE*(BLOCK_SIDE+1)];//usefull for avoid bank conflict
@@ -854,16 +852,17 @@ __device__ void MMMulDevPartialBack(REAL* h2h, REAL* w, REAL* delta, REAL* dest_
 		for(int i=0 ;i<BLOCK_SIDE;i++){
 			if(layer>0)
         temp += block_delta[t_y*BLOCK_SIDE+i]*block_w[i*BLOCK_SIDE+t_x];//product delta*W by trd[ty][tx]
-      temp_shifted_mul[t_y][ t_x + i*BLOCK_SIDE ] =  val*block_h2h[t_y*BLOCK_SIDE+i];
+      //temp_shifted_mul[t_y][ t_x + i*BLOCK_SIDE ] =  val*block_h2h[t_y*BLOCK_SIDE+i];
+        atomicAdd(&temp_sum_delta_h2h[t_x+i*BLOCK_SIDE],eta*val*block_h2h[t_y*BLOCK_SIDE+i]);
     }    
 
     if(layer > 0 && t_y < pattern)
       atomicAdd(&dest_delta[t_y*width_h2h+ curr_patterns*width_h2h + t_x], temp*block_h2h[t_y*BLOCK_SIDE+t_x]*(1.0-block_h2h[t_y*BLOCK_SIDE+t_x]));//product 
-
+    /*
     for(int j=t_x,index=0; index<BLOCK_SIDE;j+=BLOCK_SIDE, index++ ){
-			if(t_y<pattern)
+			//if(t_y<pattern)
 				atomicAdd(&temp_sum_delta_h2h[j] , eta*temp_shifted_mul[t_y][j]);
-    }
+    }*/
   
     if(enable_bias==1)//solo i blocchi con blocky = 0
       bias_to_update[t_y*BLOCK_SIDE + t_x] += block_delta[t_y*BLOCK_SIDE + t_x];
@@ -871,12 +870,13 @@ __device__ void MMMulDevPartialBack(REAL* h2h, REAL* w, REAL* delta, REAL* dest_
   if( (t_y + h2h_corner) < h2h_right_limit && (t_x + delta_corner) < delta_right_limit){
     delta_weight_dest[t_x+t_y*width_delta] = temp_sum_delta_h2h[t_y*BLOCK_SIDE+ t_x];
   }
+
   if(enable_bias==1 &&  t_y==0 && (t_x + delta_corner) < delta_right_limit){
     REAL tempBias=0.0f;
     for(int i=0;i<BLOCK_SIDE;i++)
       tempBias+=bias_to_update[i*BLOCK_SIDE+t_x];
-    delta_bias_dest[t_x] = eta*tempBias ;
-  }
+    delta_bias_dest[t_x] = eta*tempBias ; 
+  } 
 }
 
 /* si può fare la riduzione finale di W sommando i delta calcolati da ogni stream.
@@ -958,7 +958,7 @@ void feedforward (REAL *INPUT,
 	REAL *h2h, *w, *bias, *h2h_dest, *delta, *error;
 
 	//offset
-	int offset;
+	int offset,strsz= STREAMSIZE;
 
 	//startTimer(&start, &stop);
 	if (first_epoch == 1) {
@@ -978,7 +978,9 @@ void feedforward (REAL *INPUT,
 		grid.x = (nupl[1] + block.x - 1) / block.x;
 		grid.y = gs.grid[0] / grid.x;
 
-		offset = i*STREAMSIZE;
+    offset = i*STREAMSIZE;
+    strsz += (i==2)?NumPattern%(NSTREAMS*STREAMSIZE):0;
+    printf("strsz %d\n",strsz);
 		//Set pointers
 		h2h = H2H + offset*nupl[0];
 		w = WeightH2H;
@@ -987,12 +989,12 @@ void feedforward (REAL *INPUT,
 		delta = Delta + H_matrix_DELTA_index[layers - 2] + offset*nupl[layers - 1];
 		error = dev_error_mat + offset*nupl[layers - 1];
 		//Pointers set up
-
+   
 		if (first_epoch == 1) {
 			HANDLE_CUDA(cudaMemcpyAsync(h2h, INPUT + offset*nupl[0], nupl[0] * STREAMSIZE * sizeof(REAL), cudaMemcpyHostToDevice, streams[i]));
 		}
 
-		MMMulDevFeed << <grid, block, 0, streams[i] >> > (h2h, w, bias, h2h_dest, delta, error, nupl[0], nupl[1], offset, STREAMSIZE, nupl[layers-1]);
+		MMMulDevFeed << <grid, block, 0, streams[i] >> > (h2h, w, bias, h2h_dest, delta, error, nupl[0], nupl[1], offset, strsz, nupl[layers-1]);
 
 		for (int l = 1; l < (layers - 1); l++) {
 
@@ -1026,9 +1028,11 @@ void backpropagation(REAL* H_WeightH2H, REAL* H_BiasH2H, REAL* H_DeltaWeightH2H,
 
 	REAL *d_h2h, *d_w, *d_bias, *d_delta_weight, *d_delta_bias, *d_delta, *d_dest_delta, *d_delta_weight_dest, *d_delta_bias_dest;
 	
-	int offset;
+	int offset,strsz=STREAMSIZE;
 	for(int str=0;str<NSTREAMS;str++){
 		offset=str*STREAMSIZE;
+    strsz += (str==2)?NumPattern%(NSTREAMS*STREAMSIZE):0;
+    printf("strsz %d\n",strsz);
 
 		for (int l = (layers -2); l > 0; l--) {
 			optimum_grid_x(&grid, OPTIMUM_BLOCK_NUM, nupl[l]/BLOCK_SIDE, nupl[l + 1]);
@@ -1043,7 +1047,7 @@ void backpropagation(REAL* H_WeightH2H, REAL* H_BiasH2H, REAL* H_DeltaWeightH2H,
 			
 			for(int sw_x=0; sw_x < nupl[l+1]; sw_x += grid.x*BLOCK_SIDE){
 				for(int sw_y=0; sw_y < nupl[l]; sw_y += grid.y*BLOCK_SIDE) {
-					MMMulDevBack<<< grid,block,0,streams[str]>>>(d_h2h +sw_y, d_w +sw_x+sw_y*nupl[l+1], d_delta +sw_x, d_dest_delta + sw_y, d_delta_weight_dest + str*nupl[l]*nupl[l+1] +sw_x+sw_y*nupl[l+1], d_delta_bias_dest+ str*nupl[l+1] +sw_x, nupl[l], nupl[l+1], min(nupl[l]-sw_y,grid.y*BLOCK_SIDE) ,min(nupl[l+1]-sw_x,grid.x*BLOCK_SIDE),(1-sw_y),l, STREAMSIZE,eta);
+					MMMulDevBack<<< grid,block,0,streams[str]>>>(d_h2h +sw_y, d_w +sw_x+sw_y*nupl[l+1], d_delta +sw_x, d_dest_delta + sw_y, d_delta_weight_dest + str*nupl[l]*nupl[l+1] +sw_x+sw_y*nupl[l+1], d_delta_bias_dest+ str*nupl[l+1] +sw_x, nupl[l], nupl[l+1], min(nupl[l]-sw_y,grid.y*BLOCK_SIDE) ,min(nupl[l+1]-sw_x,grid.x*BLOCK_SIDE),(1-sw_y),l, strsz, eta);
 				}
 			}		
 		}
@@ -1057,7 +1061,7 @@ void backpropagation(REAL* H_WeightH2H, REAL* H_BiasH2H, REAL* H_DeltaWeightH2H,
 
 		for(int sw_x=0; sw_x < nupl[1]; sw_x += grid.x*BLOCK_SIDE){
 			for(int sw_y=0; sw_y < nupl[0]; sw_y += grid.y*BLOCK_SIDE) {
-				MMMulDevBack<<< grid,block,0,streams[str]>>>(d_h2h +sw_y, d_w +sw_x+sw_y*nupl[1], d_delta +sw_x, NULL, d_delta_weight_dest + str*nupl[0]*nupl[1] +sw_x+sw_y*nupl[1], d_delta_bias_dest+ str*nupl[1] +sw_x, nupl[0], nupl[1], min(nupl[0]-sw_y,grid.y*BLOCK_SIDE) ,min(nupl[1]-sw_x,grid.x*BLOCK_SIDE),(1-sw_y),0, STREAMSIZE,eta);
+				MMMulDevBack<<< grid,block,0,streams[str]>>>(d_h2h +sw_y, d_w +sw_x+sw_y*nupl[1], d_delta +sw_x, NULL, d_delta_weight_dest + str*nupl[0]*nupl[1] +sw_x+sw_y*nupl[1], d_delta_bias_dest+ str*nupl[1] +sw_x, nupl[0], nupl[1], min(nupl[0]-sw_y,grid.y*BLOCK_SIDE) ,min(nupl[1]-sw_x,grid.x*BLOCK_SIDE),(1-sw_y),0, strsz, eta);
 			}
 		}
 	}
@@ -1078,10 +1082,4 @@ void backpropagation(REAL* H_WeightH2H, REAL* H_BiasH2H, REAL* H_DeltaWeightH2H,
 			}
 		}
 	}
-/*    SPOSTATO NEL MAIN
-	HANDLE_CUDA(cudaMemcpy( H_DeltaWeightH2H , DeltaWeightH2H, GLOBAL_W_SIZE*sizeof(REAL), cudaMemcpyDeviceToHost));
-	HANDLE_CUDA(cudaMemcpy( H_DeltaBiasH2H, DeltaBiasH2H, (GLOBAL_BIAS_SIZE)*sizeof(REAL), cudaMemcpyDeviceToHost));
-	HANDLE_CUDA(cudaMemcpy( H_WeightH2H , WeightH2H, GLOBAL_W_SIZE*sizeof(REAL), cudaMemcpyDeviceToHost));
-	HANDLE_CUDA(cudaMemcpy( H_BiasH2H, BiasH2H, (GLOBAL_BIAS_SIZE)*sizeof(REAL), cudaMemcpyDeviceToHost));
-	*/
 }
