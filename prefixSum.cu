@@ -13,11 +13,11 @@
 #define DEFAULTBLOCKSIZE 128
 #define WARPSIZE 32
 /*Warp prefix Sum*/
-__device__ int ssb_warp_prefix_sum(int val,int *prev,int*warpReduction) {
+__device__ int ssb_warp_prefix_sum(int val,int*warpReduction) {
     int lane = threadIdx.x % WARPSIZE;
     int wid = threadIdx.x/WARPSIZE;
 
-    int temp,temp_val,old_val;
+    int temp_val,old_val;
    
     for (int offset = 2; offset <=WARPSIZE ; offset *= 2){
         temp_val=val;
@@ -33,7 +33,7 @@ __device__ int ssb_warp_prefix_sum(int val,int *prev,int*warpReduction) {
 
         temp_val=val;
         old_val=val;
-        temp=val;
+        //temp=val;
         __syncthreads();
 
         old_val=__shfl_down(old_val, offset/2);
@@ -41,58 +41,77 @@ __device__ int ssb_warp_prefix_sum(int val,int *prev,int*warpReduction) {
 
         temp_val=((lane+1-offset/2)>=0)?__shfl_up(temp_val, offset/2):0;
         val += ((lane+1)%offset==0)?temp_val:0;
-
-        __syncthreads();
-
         
         //printf("SHUFFLE %d <%d> off:%d read_right:%d -- read_left: %d  val_now:%d     add:%dsubs:%d\n",wid,lane,offset,old_val,temp_val,val, ((lane+1)%offset==0),( ((lane+1)%(offset/2)==0) && ((lane+1)%offset !=0) ));
 
-        
     }
-    
-	return val+*prev;
+
+	return val;
 }
-__device__ int ssb_block_prefix_sum(int val,int first,int *block_prefix ) {
+/*__device__ int ssb_block_prefix_sum(int val,int first,int *block_prefix ) {
     int lane = threadIdx.x %WARPSIZE;
     int wid = threadIdx.x/WARPSIZE;
 
     if(wid ==0)
-        val = ssb_warp_prefix_sum(val,&first,&block_prefix[wid]);   
+        val = ssb_warp_prefix_sum(val,&block_prefix[wid]);   
     else
-        val = ssb_warp_prefix_sum(val,&block_prefix[(wid-1)%(blockDim.x/WARPSIZE)],&block_prefix[wid]);
+        val = ssb_warp_prefix_sum(val,&block_prefix[wid]);
+
+    return val;
+}*/
+__device__ int warp_reduction(int val){
+    int lane=threadIdx.x%WARPSIZE;
+    int temp;
+    for(int off=1; off<=WARPSIZE/2;off*=2){
+        temp=__shfl_up(val,off);
+        val+=(lane>=off)?temp:0;
+    }
 
     return val;
 }
 __global__ void ssb_prefix_sum(int* in,int* out,int N){
     int t_x= threadIdx.x;
     int wid = threadIdx.x/WARPSIZE;
-
     int lane=t_x%WARPSIZE;
     int j=0;
     int val,valIn;
+    int shared_dim=DEFAULTBLOCKSIZE/WARPSIZE;//(DEFAULTBLOCKSIZE +WARPSIZE-1)/WARPSIZE;
     static __shared__ int block_prefix[DEFAULTBLOCKSIZE/WARPSIZE];
     static __shared__ int first;
 
     if(t_x==0){
         first=0;
     }
-    __syncthreads();
     do{
         valIn=in[t_x+j];//((t_x+j)<N)?in[t_x+j]:0;
-        val= ssb_block_prefix_sum(valIn,first,block_prefix);
-        /* if(t_x==0)
-            printf("first %d- %d //%d\n",first, j,val); */
+        val = ssb_warp_prefix_sum(valIn,&block_prefix[wid]);   
+
+       /* if(lane==0)
+            printf("warp %d prefix wid[%d]:%d\n",warpSize,wid,block_prefix[wid]);
+*/
+//        val= ssb_block_prefix_sum(valIn,first,block_prefix);
+        __syncthreads();
+
+        if(wid==0){//reduction of prefix made by one warp
+            int temporal= (lane< shared_dim)?block_prefix[lane]:0;
+            temporal= warp_reduction(temporal);
+            if(lane< shared_dim)
+                block_prefix[lane] = temporal ;
+        }
+        __syncthreads();
         if((t_x+j)<N)
-            out[t_x+j]=val;
+            out[t_x+j]=(wid==0)?val+first:val+block_prefix[wid-1]+first;
         if(t_x==(blockDim.x-1))
-            first= valIn+val; 
+            first= block_prefix[wid];//val; 
         /*if(t_x==0)
             first= out[blockDim.x-1]+in[blockDim.x-1];*/
         j+=blockDim.x;
-       /* if(lane==0)
-            printf("warp %d prefix wid[%d]:%d\n",warpSize,wid,block_prefix[wid]);
-            */
-            __syncthreads();
+        if(lane==0){
+            printf("\n-----\n");
+            printf("warp %d prefix wid[%d]:%d, in:%d--%d\n",warpSize,wid,block_prefix[wid],valIn,first);
+        }
+            
+        __syncthreads();
 
     }while(j<N);
 
@@ -131,7 +150,7 @@ int main(int argc, char **argv) {
     int *h_data, *h_result;
     int *d_data,*d_out;
     int blockSize = DEFAULTBLOCKSIZE;
-    int n_elements=128;//65536;
+    int n_elements= 512;//65536;
     int n_aligned;
     if(argc>1) {
     	n_elements = atoi(argv[1]);
@@ -174,7 +193,8 @@ int main(int argc, char **argv) {
     MY_CUDA_CHECK(cudaMalloc((void **)&d_out, sz));
 
     MY_CUDA_CHECK(cudaMemcpy(d_data, h_data, sz, cudaMemcpyHostToDevice));
-    ssb_prefix_sum<<< 1,blockSize>>>(d_data,d_out,n_elements);
+    //ssb_prefix_sum<<< 1,blockSize>>>(d_data,d_out,n_elements);
+    ssb_prefix_sum<<< 1,blockSize>>>(d_data,d_out,n_aligned);
     MY_CUDA_CHECK(cudaEventRecord(start, 0));
     MY_CUDA_CHECK(cudaEventRecord(stop, 0));
     MY_CUDA_CHECK(cudaEventSynchronize(stop));
@@ -182,14 +202,15 @@ int main(int argc, char **argv) {
     et+=inc;
     MY_CUDA_CHECK(cudaMemcpy(h_result, d_out, n_elements*sizeof(int), cudaMemcpyDeviceToHost));
     printf("\n");
-    for(int i =0;i< 3*WARPSIZE;i++){
+    for(int i =0;i< n_elements;i++){
         if(i%WARPSIZE==0)
-            printf("\n");
+            printf("\n%d) %d\n",i/WARPSIZE,h_data[i]);
         printf("%d ",h_result[i]);
         
     }
+    
 //    MY_CUDA_CHECK(cudaMemcpy(h_result, d_data, n_elements*sizeof(int), cudaMemcpyDeviceToHost));
-    printf("Time (ms): %f\n", et);
+    printf("\nTime (ms): %f\n", et);
     printf("%d elements scanned in %f ms -> %f MegaElements/s\n",
              n_elements, et, n_elements/(et/1000.0f)/1000000.0f);
 
