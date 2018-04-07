@@ -172,9 +172,6 @@ void HOST_init_struct( REAL* WeightH2H, REAL* BiasH2H, REAL* DeltaWeightH2H, REA
   }
 }
 
-
-texture<REAL, 2, cudaReadModeElementType> texreference_target;
-
 /*UTILITIES*/
 
 static void HandleCuda(cudaError_t err, const char *file, int line) {
@@ -217,7 +214,9 @@ void optimum_grid_x(dim3* grid,int max_block,int y_limit, int width_delta){
     grid->y = y;
 }       
 /*DEVICE*/
-
+texture<REAL, 2, cudaReadModeElementType> texreference_target;
+__constant__ REAL alphaC[1];
+__constant__ REAL etaC[1];
 /*deviceReduceBlockAtomicKernel*/
 __inline__ __device__ REAL warpReduceSum(REAL);
 __inline__ __device__ REAL blockReduceSum(REAL);
@@ -227,12 +226,12 @@ __global__ void deviceReduceBlockAtomicKernel(REAL *, REAL*, int);
 __device__ void MMMulDevPartialFeed(REAL *, REAL *, REAL *, REAL *, REAL*, REAL *, unsigned int, unsigned int, unsigned int, unsigned int, int);
 __global__ void MMMulDevFeed(REAL *, REAL *, REAL *, REAL *, REAL *, REAL*, unsigned int, unsigned int, unsigned int, int, int);
 
-/* MMMul backprog*/
-__device__ void MMMulDevPartialBack(REAL* , REAL* , REAL* , REAL* , REAL* , REAL* , int , int , int , int , BOOL, int, int, REAL);
-__global__ void MMMulDevBack(REAL* , REAL* , REAL* , REAL* ,REAL* , REAL* , int , int , int , int , BOOL, int, int, REAL );
-
-__device__ void MMMulReductionBlock(REAL* , REAL* , REAL* , REAL* , REAL* , REAL* , int , int , int , int ,  int , int , BOOL, int, REAL );
-__global__ void MMMulReduction(REAL* , REAL* , REAL* , REAL* , REAL* , REAL* , int , int , int , int ,  int , int , BOOL, int, REAL );
+/* MMMul backpropagation*/
+__device__ void MMMulDevPartialBack(REAL* , REAL* , REAL* , REAL* , REAL* , REAL* , int , int , int , int , BOOL, int, int);
+__global__ void MMMulDevBack(REAL* , REAL* , REAL* , REAL* ,REAL* , REAL* , int , int , int , int , BOOL, int, int);
+/* MMMul reduction after backpropagation*/
+__device__ void MMMulReductionBlock(REAL* , REAL* , REAL* , REAL* , REAL* , REAL* , int , int , int , int ,  int , int , BOOL, int);
+__global__ void MMMulReduction(REAL* , REAL* , REAL* , REAL* , REAL* , REAL* , int , int , int , int ,  int , int , BOOL, int);
 
 
 /*HOST*/
@@ -242,21 +241,13 @@ void feedforward(REAL *, REAL* , REAL* ,REAL*,REAL*, int* , int*, int* , int* ,
 	int  , int , int , int , int );
 void backpropagation(REAL* , REAL* , REAL* , REAL* , REAL* , REAL* , int* , int*,  int* , int* ,
 	REAL* , REAL* , REAL* , REAL* , REAL* ,REAL* ,REAL* , REAL* , 
-	int*  , int , cudaStream_t* ,int  , int , int , int , int , int , REAL,REAL);
+	int*  , int , cudaStream_t* ,int  , int , int , int , int , int);
 
 
 int main(int argc, char *argv[]) {
     int     h, i, j, k, epoch;
     int    NumPattern, NumInput, NumOutput;
-/*
-    double Input[NUMPAT+1][NUMIN+1] = { 0, 0, 0,  0, 0, 0,  0, 1, 0,  0, 0, 1,  0, 1, 1 };
-    double Target[NUMPAT+1][NUMOUT+1] = { 0, 0,  0, 0,  0, 1,  0, 1,  0, 0 };
-    double SumH[NUMPAT+1][NUMHID+1], WeightIH[NUMIN+1][NUMHID+1], Hidden[NUMPAT+1][NUMHID+1];
-    double SumO[NUMPAT+1][NUMOUT+1], WeightHO[NUMHID+1][NUMOUT+1], Output[NUMPAT+1][NUMOUT+1];
-    double DeltaO[NUMPAT+1][NUMOUT+1], SumDOW[NUMHID+1], DeltaH[NUMPAT+1][NUMHID+1];
-    double DeltaWeightIH[NUMIN+1][NUMHID+1], DeltaWeightHO[NUMHID+1][NUMOUT+1];
-    double Error, eta = 0.5, alpha = 0.9, smallwt = 0.5;
-*/
+    /* device and host matrix */
     REAL* WeightH2H, *BiasH2H, *DeltaWeightH2H, *DeltaBiasH2H, *Delta, *H2H, *TempDeltaWeightH2H, *TempDeltaBiasH2H;
     REAL* H_WeightH2H,*H_BiasH2H,*H_DeltaWeightH2H,*H_DeltaBiasH2H,*H_Delta,*H_H2H;
     
@@ -324,7 +315,6 @@ int main(int argc, char *argv[]) {
     if(ini==NULL) { writelog(TRUE,APPLICATION_RC,"Cannot parse file: %s\n", inputfile); }
 
     READINTFI(maxepoch,"Max number of epochs");
-    //READINTFI(NSTREAMS,"Nstreams");
     READINTFI(NumPattern,"Number of training data");
     READINTFI(NumInput,"Number of input units");
     READINTFI(NumOutput,"Number of output units");
@@ -354,9 +344,10 @@ int main(int argc, char *argv[]) {
       }
     }
   
-    cudaStream_t streams[NSTREAMS];//nstreams letto da imput.ml
+    cudaStream_t streams[NSTREAMS];
     int TOTAL_LAYER = NumHL +2; //#of layers
     int STREAMSIZE = NumPattern/NSTREAMS;
+    /* total size of h2h,delta,w,bias arrays */
 		int GLOBAL_H_SIZE= NumPattern*NumInput, GLOBAL_DELTA_SIZE=0, GLOBAL_W_SIZE=0, GLOBAL_BIAS_SIZE=0;
     for(int numl=1;numl<TOTAL_LAYER;numl++){
       GLOBAL_H_SIZE += nupl[numl]*NumPattern;
@@ -417,7 +408,9 @@ int main(int argc, char *argv[]) {
     HANDLE_CUDA(cudaMalloc((void **)&TempDeltaWeightH2H, NSTREAMS*GLOBAL_W_SIZE *sizeof(REAL)));
     HANDLE_CUDA(cudaMalloc((void **)&TempDeltaBiasH2H, NSTREAMS*GLOBAL_BIAS_SIZE *sizeof(REAL)));
 
-	/*---------------------------end REAL structures on host and device----------------------------*/
+    HANDLE_CUDA(cudaMemcpyToSymbol(etaC,&eta,sizeof(REAL)));
+    HANDLE_CUDA(cudaMemcpyToSymbol(alphaC,&alpha,sizeof(REAL)));
+  /*---------------------------end REAL structures on host and device----------------------------*/
   /*++++---------------------------cuda array for texture-----------------------------++++*/
     cudaArray* DEV_TARGET_CUDA;
     cudaChannelFormatDesc channel;
@@ -437,7 +430,8 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < NSTREAMS; i++) {
       HANDLE_CUDA(cudaStreamCreate(&streams[i]));
     }
-  /*---------------end--streams creation-----------*/
+    /*---------------end--streams creation-----------*/
+    /*++++---------------------------------Scan files----------------------------------++++*/
 
     if(strcmp(LogFileName,NULLFILE)) { fpl=Fopen(LogFileName,"w"); }
 
@@ -478,13 +472,7 @@ int main(int argc, char *argv[]) {
         if (fp) fclose(fp);
         if (fpd) fclose(fpd);
     }
-    //printMat(INPUT_MAT,NumPattern,NumInput);
-/*   for(h=NumHL;h>=0;h--){
-    printMat(&H_BiasH2H[H_matrix_B_index[h]],1,nupl[h+1]);
-    printMat(&H_DeltaBiasH2H[H_matrix_B_index[h]],1,nupl[h+1]);
-    printMat(&H_WeightH2H[H_matrix_W_index[h]],nupl[h],nupl[h+1]);
-    printMat(&H_DeltaWeightH2H[H_matrix_W_index[h]],nupl[h],nupl[h+1]);
-  } */
+
     if(verbose) {
       printf("\nInitial Bias and Weights\n");
       for( k = 0 ; k <  nupl[NumHL+1] ; k ++ ) {
@@ -503,6 +491,8 @@ int main(int argc, char *argv[]) {
       }
     }
     fprintf(stderr,"end reading\n");
+    /*---------------------------------end Scan files----------------------------------*/
+    /*++++---------------------------------Iteration throught epoch----------------------------------++++*/
 
     cudaEvent_t start, stop;
     for( epoch = 0 ; epoch < maxepoch ; epoch++) {    /* iterate weight updates */
@@ -526,7 +516,7 @@ int main(int argc, char *argv[]) {
       startTimer(&start, &stop);
       backpropagation(H_WeightH2H, H_BiasH2H, H_DeltaWeightH2H, H_DeltaBiasH2H, H_Delta, H_H2H, H_matrix_W_index, H_matrix_B_index, H_matrix_DELTA_index, H_matrix_H2H_index,
         WeightH2H, BiasH2H, DeltaWeightH2H, DeltaBiasH2H, Delta, H2H, TempDeltaWeightH2H, TempDeltaBiasH2H, 
-        nupl, TOTAL_LAYER, streams, GLOBAL_BIAS_SIZE , GLOBAL_W_SIZE, GLOBAL_DELTA_SIZE, NSTREAMS, STREAMSIZE, NumPattern, eta, alpha);
+        nupl, TOTAL_LAYER, streams, GLOBAL_BIAS_SIZE , GLOBAL_W_SIZE, GLOBAL_DELTA_SIZE, NSTREAMS, STREAMSIZE, NumPattern);
       /*-------------------------------------END---BACKPROPAGATION-------------------------------------------*/
       stopAndPrint(&start, &stop);
     
@@ -541,32 +531,14 @@ int main(int argc, char *argv[]) {
       HANDLE_CUDA(cudaMemset(DEV_ERROR, 0, sizeof(REAL)));
 
     }
+  /*---------------------------------end Iteration throught epoch----------------------------------*/
 
-	HANDLE_CUDA(cudaMemcpy( H_DeltaWeightH2H , DeltaWeightH2H, GLOBAL_W_SIZE*sizeof(REAL), cudaMemcpyDeviceToHost));
-	HANDLE_CUDA(cudaMemcpy( H_DeltaBiasH2H, DeltaBiasH2H, (GLOBAL_BIAS_SIZE)*sizeof(REAL), cudaMemcpyDeviceToHost));
-	HANDLE_CUDA(cudaMemcpy( H_WeightH2H , WeightH2H, GLOBAL_W_SIZE*sizeof(REAL), cudaMemcpyDeviceToHost));
-	HANDLE_CUDA(cudaMemcpy( H_BiasH2H, BiasH2H, (GLOBAL_BIAS_SIZE)*sizeof(REAL), cudaMemcpyDeviceToHost));
+    HANDLE_CUDA(cudaMemcpy( H_DeltaWeightH2H , DeltaWeightH2H, GLOBAL_W_SIZE*sizeof(REAL), cudaMemcpyDeviceToHost));
+    HANDLE_CUDA(cudaMemcpy( H_DeltaBiasH2H, DeltaBiasH2H, (GLOBAL_BIAS_SIZE)*sizeof(REAL), cudaMemcpyDeviceToHost));
+    HANDLE_CUDA(cudaMemcpy( H_WeightH2H , WeightH2H, GLOBAL_W_SIZE*sizeof(REAL), cudaMemcpyDeviceToHost));
+    HANDLE_CUDA(cudaMemcpy( H_BiasH2H, BiasH2H, (GLOBAL_BIAS_SIZE)*sizeof(REAL), cudaMemcpyDeviceToHost));
 	
 
-
-#if 0
-    fprintf(stdout, "\n\nNETWORK REAL - EPOCH %d\n\nPat\t", epoch) ;   /* print network outputs */
-    for( i = 0 ; i < NumInput ; i++ ) {
-        fprintf(stdout, "Input%-4d\t", i) ;
-    }
-    for( k = 0 ; k < NumOutput ; k++ ) {
-        fprintf(stdout, "Target%-4d\tOutput%-4d\t", k, k) ;
-    }
-    for( p = 0 ; p < NumPattern ; p++ ) {
-    fprintf(stdout, "\n%d\t", p) ;
-        for( i = 0 ; i < NumInput ; i++ ) {
-            fprintf(stdout, "%f\t", Input[p][i]) ;
-        }
-        for( k = 1 ; k <= NumOutput ; k++ ) {
-            fprintf(stdout, "%f\t%f\t", Target[p][k-1], Output[p][k]) ;
-        }
-    }
-#endif
     if(verbose) {
     	printf("\nFinal Bias and Weights\n");
     }
@@ -613,7 +585,7 @@ int main(int argc, char *argv[]) {
 
   /*++++--------------------------------deallocations------------------------------------++++*/
   
-  //Host dealloc
+    //Host dealloc
     free(nupl);
     free(TARGET);
     free(ERROR_MAT);
@@ -624,6 +596,7 @@ int main(int argc, char *argv[]) {
     free(H_DeltaBiasH2H);
     free(H_Delta);
     free(H_H2H);
+    //Device dealloc
     cudaFreeHost(INPUT_MAT);
     cudaFree(DEV_ERROR_MAT);
     cudaFree(DEV_ERROR);
@@ -642,8 +615,6 @@ int main(int argc, char *argv[]) {
     cudaFreeArray(DEV_TARGET_CUDA);
 
     /*------------------------------------end deallocations------------------------------------*/
-
-
 
     return 0 ;
 }
@@ -686,7 +657,7 @@ __inline__ __device__ REAL blockReduceSum(REAL val) {
 
 /*Reducing large arrays--Blocks implementation*/
 
-//Nella chiamata di questo kernel � meglio usare una griglia lineare di 8 blocchi con 256 threads ciascuno -- 
+//Nella chiamata di questo kernel è meglio usare una griglia lineare di 8 blocchi con 256 threads ciascuno -- 
 //In tal modo vengono limitati gli accessi alla shared memory rispetto all'implementazione con 2 blocchi da 1024 threads ciascuno
 //Attenzione ai possibili arrotondamenti di numeri a virgola mobile dovuti alle atomicAdd.
 __global__ void deviceReduceBlockAtomicKernel(REAL *in, REAL* out, int N) {
@@ -703,7 +674,7 @@ __global__ void deviceReduceBlockAtomicKernel(REAL *in, REAL* out, int N) {
 
 /*++++---------------------------MMMul--Feedforward-------------------------++++*/
 
-/* h2h � il puntatore alla porzione dell'h2h globale da considerare in questa fase
+/* h2h è il puntatore alla porzione dell'h2h globale da considerare in questa fase
 (ad ogni passo il kernel che invoca questo device incrementa il puntatore h2h
 in modo proporzionale al patt_per_step (e similmente h2h_dest) (vedi sotto)).
 offset_y � la posizione considerata lungo le y (nelle matrici h2h, h2h_dest ed eventualmente error) durante la chiamata corrente a __device__.
@@ -814,7 +785,7 @@ __global__ void MMMulDevFeed(REAL *h2h, REAL *w, REAL *biases, REAL *h2h_dest, R
 /*-------------------------------MMul--Backpropagation--------------------------*/
 /* la matrice di destinazione è width_h2h x width_delta     */
 /* h2h_corner,delta_corner  sono in previsione di una "sliding grid" */
-__device__ void MMMulDevPartialBack(REAL* h2h, REAL* w, REAL* delta, REAL* dest_delta, REAL* delta_weight_dest, REAL* delta_bias_dest, int width_h2h, int width_delta, int h2h_right_limit, int delta_right_limit, BOOL enable_bias, int layer, int STREAMSIZE, REAL eta){
+__device__ void MMMulDevPartialBack(REAL* h2h, REAL* w, REAL* delta, REAL* dest_delta, REAL* delta_weight_dest, REAL* delta_bias_dest, int width_h2h, int width_delta, int h2h_right_limit, int delta_right_limit, BOOL enable_bias, int layer, int STREAMSIZE){
   int t_x = threadIdx.x;
   int t_y = threadIdx.y;
     /* int idx = t_x + blockIdx.x*BLOCK_SIDE ; 
@@ -824,9 +795,9 @@ __device__ void MMMulDevPartialBack(REAL* h2h, REAL* w, REAL* delta, REAL* dest_
   int delta_corner = blockIdx.x*BLOCK_SIDE;
 
   //__shared__ REAL temp_shifted_mul[BLOCK_SIDE][BLOCK_SIDE*BLOCK_SIDE];//può contenere diversi 0 nei casi sui bordi
-  __shared__ REAL temp_sum_delta_h2h[BLOCK_SIDE*BLOCK_SIDE];//può essere riciclato per W
+  __shared__ REAL temp_sum_delta_h2h[BLOCK_SIDE*BLOCK_SIDE];
   __shared__ REAL block_h2h[BLOCK_SIDE*BLOCK_SIDE];
-  __shared__ REAL block_w[BLOCK_SIDE*(BLOCK_SIDE+1)];//usefull for avoid bank conflict
+  __shared__ REAL block_w[BLOCK_SIDE*(BLOCK_SIDE)];
   __shared__ REAL block_delta[BLOCK_SIDE*BLOCK_SIDE];
   __shared__ REAL bias_to_update[BLOCK_SIDE*BLOCK_SIDE];
 
@@ -835,7 +806,7 @@ __device__ void MMMulDevPartialBack(REAL* h2h, REAL* w, REAL* delta, REAL* dest_
 
   temp_sum_delta_h2h[t_x+t_y*BLOCK_SIDE]=0.0f;
 	if(layer>0)
-	  block_w[t_x*BLOCK_SIDE+t_y] = (max_a_x > t_y && max_b_x > t_x) ? w[t_y*width_delta + t_x]:0.0f;
+	  block_w[t_x*BLOCK_SIDE+t_y] = (max_a_x > t_y && max_b_x > t_x) ? w[t_y*width_delta + t_x]:0.0f;//trasposta
 
   if(enable_bias==1)
     bias_to_update[t_y*BLOCK_SIDE + t_x] = 0.0f;
@@ -851,9 +822,9 @@ __device__ void MMMulDevPartialBack(REAL* h2h, REAL* w, REAL* delta, REAL* dest_
 		__syncthreads();
 		for(int i=0 ;i<BLOCK_SIDE;i++){
 			if(layer>0)
-        temp += block_delta[t_y*BLOCK_SIDE+i]*block_w[i*BLOCK_SIDE+t_x];//product delta*W by trd[ty][tx]
+        temp += block_delta[t_y*BLOCK_SIDE+i]*block_w[i*BLOCK_SIDE+t_x];//partial sum of product delta*W by trd[ty][tx]
       //temp_shifted_mul[t_y][ t_x + i*BLOCK_SIDE ] =  val*block_h2h[t_y*BLOCK_SIDE+i];
-        atomicAdd(&temp_sum_delta_h2h[t_x+i*BLOCK_SIDE],eta*val*block_h2h[t_y*BLOCK_SIDE+i]);
+      atomicAdd(&temp_sum_delta_h2h[t_x+i*BLOCK_SIDE],etaC[0]*val*block_h2h[t_y*BLOCK_SIDE+i]);
     }    
 
     if(layer > 0 && t_y < pattern)
@@ -875,7 +846,7 @@ __device__ void MMMulDevPartialBack(REAL* h2h, REAL* w, REAL* delta, REAL* dest_
     REAL tempBias=0.0f;
     for(int i=0;i<BLOCK_SIDE;i++)
       tempBias+=bias_to_update[i*BLOCK_SIDE+t_x];
-    delta_bias_dest[t_x] = eta*tempBias ; 
+    delta_bias_dest[t_x] = etaC[0]*tempBias ; 
   } 
 }
 
@@ -889,7 +860,8 @@ __device__ void MMMulDevPartialBack(REAL* h2h, REAL* w, REAL* delta, REAL* dest_
 
 
 
-__device__ void MMMulReductionBlock(REAL* W, REAL* BIAS, REAL* DELTA_WEIGHT, REAL* DELTA_BIAS, REAL* DELTA_WEIGHT_DEST, REAL* DELTA_BIAS_DEST, int offset_weight, int offset_bias, int width_h2h, int width_delta,  int Y_right_limit, int X_right_limit, BOOL enable_bias, int NSTREAMS, REAL alpha){
+__device__ void MMMulReductionBlock(REAL* W, REAL* BIAS, REAL* DELTA_WEIGHT, REAL* DELTA_BIAS, REAL* DELTA_WEIGHT_DEST, REAL* DELTA_BIAS_DEST, int offset_weight, int offset_bias, int width_h2h, int width_delta,  int Y_right_limit, int X_right_limit, BOOL enable_bias, int NSTREAMS){
+  //__device__ void MMMulReductionBlock(REAL* W, REAL* BIAS, REAL* DELTA_WEIGHT, REAL* DELTA_BIAS, REAL* DELTA_WEIGHT_DEST, REAL* DELTA_BIAS_DEST, int offset_weight, int offset_bias, int width_h2h, int width_delta,  int Y_right_limit, int X_right_limit, BOOL enable_bias, int NSTREAMS){   
     
     int t_x = threadIdx.x;
     int t_y = threadIdx.y;
@@ -900,7 +872,7 @@ __device__ void MMMulReductionBlock(REAL* W, REAL* BIAS, REAL* DELTA_WEIGHT, REA
  
     if( (b_x + t_x) < X_right_limit && (b_y+ t_y) < Y_right_limit){
        
-        REAL dw_loc = alpha*DELTA_WEIGHT[t_x+t_y*width_delta];
+        REAL dw_loc = alphaC[0]*DELTA_WEIGHT[t_x+t_y*width_delta];
         REAL dbias_loc;
                 
         for(int i=0 ;i<NSTREAMS; i++){
@@ -912,8 +884,8 @@ __device__ void MMMulReductionBlock(REAL* W, REAL* BIAS, REAL* DELTA_WEIGHT, REA
         }
         if(enable_bias==1 && t_y==0){
             //printf("enable_bias [%d][%d] -- DELTA BIAS:%f    local %f,  %f\n",b_y+t_y,b_x+t_x, DELTA_BIAS[t_x]+dbias_loc ,dbias_loc, alpha*DELTA_BIAS[t_x]);
-            BIAS[t_x] += dbias_loc + alpha*DELTA_BIAS[t_x];
-            DELTA_BIAS[t_x] = dbias_loc + alpha*DELTA_BIAS[t_x];
+            BIAS[t_x] += dbias_loc + alphaC[0]*DELTA_BIAS[t_x];
+            DELTA_BIAS[t_x] = dbias_loc + alphaC[0]*DELTA_BIAS[t_x];
         }
         W[t_x + t_y*width_delta] += dw_loc;
         DELTA_WEIGHT[t_x + t_y*width_delta] = dw_loc;
@@ -921,21 +893,21 @@ __device__ void MMMulReductionBlock(REAL* W, REAL* BIAS, REAL* DELTA_WEIGHT, REA
     }
 }
 
-__global__ void MMMulReduction(REAL* W, REAL* BIAS, REAL* DELTA_WEIGHT, REAL* DELTA_BIAS, REAL* DELTA_WEIGHT_DEST, REAL* DELTA_BIAS_DEST, int offset_weight, int offset_bias, int width_h2h, int width_delta,  int Y_right_limit, int X_right_limit, BOOL enable_bias, int NSTREAMS, REAL alpha){
+__global__ void MMMulReduction(REAL* W, REAL* BIAS, REAL* DELTA_WEIGHT, REAL* DELTA_BIAS, REAL* DELTA_WEIGHT_DEST, REAL* DELTA_BIAS_DEST, int offset_weight, int offset_bias, int width_h2h, int width_delta,  int Y_right_limit, int X_right_limit, BOOL enable_bias, int NSTREAMS){
     int b_x = blockIdx.x*BLOCK_SIDE;
     int b_y = blockIdx.y*BLOCK_SIDE;
     //enable bias vale 1 se la griglia si è spostata lungo la x . Gli unici blocchi che calcoleranno il delta bias sono quelli con blockIdy = 0
     if(b_x < X_right_limit && b_y <Y_right_limit)
-      MMMulReductionBlock(W+b_x+b_y*width_delta, BIAS+ b_x, DELTA_WEIGHT+b_x+b_y*width_delta, DELTA_BIAS+ b_x, DELTA_WEIGHT_DEST, DELTA_BIAS_DEST, offset_weight, offset_bias, width_h2h, width_delta,  Y_right_limit, X_right_limit, enable_bias*(1-blockIdx.y),NSTREAMS,alpha);
+      MMMulReductionBlock(W+b_x+b_y*width_delta, BIAS+ b_x, DELTA_WEIGHT+b_x+b_y*width_delta, DELTA_BIAS+ b_x, DELTA_WEIGHT_DEST, DELTA_BIAS_DEST, offset_weight, offset_bias, width_h2h, width_delta,  Y_right_limit, X_right_limit, enable_bias*(1-blockIdx.y),NSTREAMS);
     //__syncthreads();
 }
-__global__ void MMMulDevBack(REAL* H2H, REAL* W, REAL* DELTA, REAL* DEST_DELTA, REAL* DELTA_WEIGHT_DEST, REAL* DELTA_BIAS_DEST, int width_h2h, int width_delta, int h2h_right_limit, int delta_right_limit, BOOL enable_bias,int layer, int STREAMSIZE, REAL eta){
+__global__ void MMMulDevBack(REAL* H2H, REAL* W, REAL* DELTA, REAL* DEST_DELTA, REAL* DELTA_WEIGHT_DEST, REAL* DELTA_BIAS_DEST, int width_h2h, int width_delta, int h2h_right_limit, int delta_right_limit, BOOL enable_bias,int layer, int STREAMSIZE){
     int b_x = blockIdx.x*BLOCK_SIDE;
     int b_y = blockIdx.y*BLOCK_SIDE;
     //enable bias vale 1 se la griglia si è spostata lungo la x . Gli unici blocchi che calcoleranno il delta bias sono quelli con blockIdy = 0
 	
 	  if(b_x < delta_right_limit && b_y <h2h_right_limit)
-      MMMulDevPartialBack(H2H +b_y, W +b_x+b_y*width_delta, DELTA +b_x, DEST_DELTA+b_y, DELTA_WEIGHT_DEST +b_x+b_y*width_delta, DELTA_BIAS_DEST +b_x, width_h2h, width_delta, h2h_right_limit, delta_right_limit, enable_bias*(1-blockIdx.y),layer, STREAMSIZE, eta);
+      MMMulDevPartialBack(H2H +b_y, W +b_x+b_y*width_delta, DELTA +b_x, DEST_DELTA+b_y, DELTA_WEIGHT_DEST +b_x+b_y*width_delta, DELTA_BIAS_DEST +b_x, width_h2h, width_delta, h2h_right_limit, delta_right_limit, enable_bias*(1-blockIdx.y),layer, STREAMSIZE);
     //__syncthreads();
 }
 /*-----------------------------end--MMul--Backpropagation--------------------------*/
@@ -944,7 +916,6 @@ __global__ void MMMulDevBack(REAL* H2H, REAL* W, REAL* DELTA, REAL* DEST_DELTA, 
 /*HOST*/
 
 /*FIRT PHASE OF THE ALGORITHM -- THE INPUT IS TRANSMITTED VIA THE NETWORK*/ 
-// OCCHIO NON SERVE PASSARE LE MATRICI H_H2H, H_DELTA_H2H, H_DELTA_WH2H, H_DELTA_BIASH2H, DELTA_WH2H,DELTA_BIAS
 void feedforward (REAL *INPUT, 
 	REAL* H_WeightH2H, REAL* H_BiasH2H, REAL* H_DeltaWeightH2H, REAL* H_DeltaBiasH2H, int* H_matrix_W_index, int* H_matrix_B_index, int* H_matrix_DELTA_index, int* H_matrix_H2H_index,
 	REAL* WeightH2H, REAL* BiasH2H, REAL* Delta, REAL* H2H, REAL* DeltaWeightH2H, REAL* DeltaBiasH2H,
@@ -960,7 +931,6 @@ void feedforward (REAL *INPUT,
 	//offset
 	int offset,strsz= STREAMSIZE;
 
-	//startTimer(&start, &stop);
 	if (first_epoch == 1) {
 		HANDLE_CUDA(cudaMemcpy(WeightH2H, H_WeightH2H, GLOBAL_W_SIZE * sizeof(REAL), cudaMemcpyHostToDevice));
 		HANDLE_CUDA(cudaMemcpy(BiasH2H, H_BiasH2H, GLOBAL_BIAS_SIZE * sizeof(REAL), cudaMemcpyHostToDevice));
@@ -969,7 +939,6 @@ void feedforward (REAL *INPUT,
 
 
 	}
-	//stopAndPrint(&start, &stop);
 
 	for (int i = 0; i < NSTREAMS; i++) {
 
@@ -980,7 +949,6 @@ void feedforward (REAL *INPUT,
 
     offset = i*STREAMSIZE;
     strsz += (i==2)?NumPattern%(NSTREAMS*STREAMSIZE):0;
-    printf("strsz %d\n",strsz);
 		//Set pointers
 		h2h = H2H + offset*nupl[0];
 		w = WeightH2H;
@@ -1021,7 +989,7 @@ void feedforward (REAL *INPUT,
 /*	 BACKPROPAGATION	*/
 void backpropagation(REAL* H_WeightH2H, REAL* H_BiasH2H, REAL* H_DeltaWeightH2H, REAL* H_DeltaBiasH2H, REAL* H_Delta, REAL* H_H2H, int* H_matrix_W_index, int * H_matrix_B_index,int* H_matrix_DELTA_index, int* H_matrix_H2H_index,
 	REAL* WeightH2H, REAL* BiasH2H, REAL* DeltaWeightH2H, REAL* DeltaBiasH2H, REAL* Delta,REAL* H2H,REAL* TempDeltaWeightH2H, REAL* TempDeltaBiasH2H, 
-	int* nupl , int layers, cudaStream_t* streams,int GLOBAL_BIAS_SIZE , int GLOBAL_W_SIZE, int GLOBAL_DELTA_SIZE, int NSTREAMS, int STREAMSIZE, int NumPattern, REAL eta, REAL alpha){
+	int* nupl , int layers, cudaStream_t* streams,int GLOBAL_BIAS_SIZE , int GLOBAL_W_SIZE, int GLOBAL_DELTA_SIZE, int NSTREAMS, int STREAMSIZE, int NumPattern){
     dim3 grid,block;
     block.x= BLOCK_SIDE;
     block.y= BLOCK_SIDE;
@@ -1032,11 +1000,10 @@ void backpropagation(REAL* H_WeightH2H, REAL* H_BiasH2H, REAL* H_DeltaWeightH2H,
 	for(int str=0;str<NSTREAMS;str++){
 		offset=str*STREAMSIZE;
     strsz += (str==2)?NumPattern%(NSTREAMS*STREAMSIZE):0;
-    printf("strsz %d\n",strsz);
+    //printf("strsz %d\n",strsz);
 
 		for (int l = (layers -2); l > 0; l--) {
 			optimum_grid_x(&grid, OPTIMUM_BLOCK_NUM, nupl[l]/BLOCK_SIDE, nupl[l + 1]);
-			//printf("grid :%d %d\n",grid.y,grid.x);
 			//Set pointers
 			d_h2h = H2H + H_matrix_H2H_index[l] + offset*nupl[l];
 			d_w = WeightH2H + H_matrix_W_index[l];
@@ -1047,7 +1014,7 @@ void backpropagation(REAL* H_WeightH2H, REAL* H_BiasH2H, REAL* H_DeltaWeightH2H,
 			
 			for(int sw_x=0; sw_x < nupl[l+1]; sw_x += grid.x*BLOCK_SIDE){
 				for(int sw_y=0; sw_y < nupl[l]; sw_y += grid.y*BLOCK_SIDE) {
-					MMMulDevBack<<< grid,block,0,streams[str]>>>(d_h2h +sw_y, d_w +sw_x+sw_y*nupl[l+1], d_delta +sw_x, d_dest_delta + sw_y, d_delta_weight_dest + str*nupl[l]*nupl[l+1] +sw_x+sw_y*nupl[l+1], d_delta_bias_dest+ str*nupl[l+1] +sw_x, nupl[l], nupl[l+1], min(nupl[l]-sw_y,grid.y*BLOCK_SIDE) ,min(nupl[l+1]-sw_x,grid.x*BLOCK_SIDE),(1-sw_y),l, strsz, eta);
+					MMMulDevBack<<< grid,block,0,streams[str]>>>(d_h2h +sw_y, d_w +sw_x+sw_y*nupl[l+1], d_delta +sw_x, d_dest_delta + sw_y, d_delta_weight_dest + str*nupl[l]*nupl[l+1] +sw_x+sw_y*nupl[l+1], d_delta_bias_dest+ str*nupl[l+1] +sw_x, nupl[l], nupl[l+1], min(nupl[l]-sw_y,grid.y*BLOCK_SIDE) ,min(nupl[l+1]-sw_x,grid.x*BLOCK_SIDE),(1-sw_y),l, strsz);
 				}
 			}		
 		}
@@ -1061,7 +1028,7 @@ void backpropagation(REAL* H_WeightH2H, REAL* H_BiasH2H, REAL* H_DeltaWeightH2H,
 
 		for(int sw_x=0; sw_x < nupl[1]; sw_x += grid.x*BLOCK_SIDE){
 			for(int sw_y=0; sw_y < nupl[0]; sw_y += grid.y*BLOCK_SIDE) {
-				MMMulDevBack<<< grid,block,0,streams[str]>>>(d_h2h +sw_y, d_w +sw_x+sw_y*nupl[1], d_delta +sw_x, NULL, d_delta_weight_dest + str*nupl[0]*nupl[1] +sw_x+sw_y*nupl[1], d_delta_bias_dest+ str*nupl[1] +sw_x, nupl[0], nupl[1], min(nupl[0]-sw_y,grid.y*BLOCK_SIDE) ,min(nupl[1]-sw_x,grid.x*BLOCK_SIDE),(1-sw_y),0, strsz, eta);
+				MMMulDevBack<<< grid,block,0,streams[str]>>>(d_h2h +sw_y, d_w +sw_x+sw_y*nupl[1], d_delta +sw_x, NULL, d_delta_weight_dest + str*nupl[0]*nupl[1] +sw_x+sw_y*nupl[1], d_delta_bias_dest+ str*nupl[1] +sw_x, nupl[0], nupl[1], min(nupl[0]-sw_y,grid.y*BLOCK_SIDE) ,min(nupl[1]-sw_x,grid.x*BLOCK_SIDE),(1-sw_y),0, strsz);
 			}
 		}
 	}
@@ -1078,7 +1045,7 @@ void backpropagation(REAL* H_WeightH2H, REAL* H_BiasH2H, REAL* H_DeltaWeightH2H,
 
 		for(int sw_x=0; sw_x < nupl[l+1]; sw_x += grid.x*BLOCK_SIDE){
 			for(int sw_y=0; sw_y < nupl[l];sw_y += grid.y*BLOCK_SIDE) {
-				MMMulReduction<<<grid,block>>>(d_w +sw_x+sw_y*nupl[l+1], d_bias+ sw_x, d_delta_weight +sw_x+sw_y*nupl[l+1], d_delta_bias +sw_x , d_delta_weight_dest, d_delta_bias_dest, sw_x+sw_y*nupl[l+1], sw_x,  nupl[l], nupl[l+1], min(nupl[l]-sw_y,grid.y*BLOCK_SIDE) ,min(nupl[l+1]-sw_x,grid.x*BLOCK_SIDE),(1-sw_y),NSTREAMS,alpha);
+				MMMulReduction<<<grid,block>>>(d_w +sw_x+sw_y*nupl[l+1], d_bias+ sw_x, d_delta_weight +sw_x+sw_y*nupl[l+1], d_delta_bias +sw_x , d_delta_weight_dest, d_delta_bias_dest, sw_x+sw_y*nupl[l+1], sw_x,  nupl[l], nupl[l+1], min(nupl[l]-sw_y,grid.y*BLOCK_SIDE) ,min(nupl[l+1]-sw_x,grid.x*BLOCK_SIDE),(1-sw_y),NSTREAMS);
 			}
 		}
 	}
