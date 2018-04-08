@@ -783,8 +783,13 @@ __global__ void MMMulDevFeed(REAL *h2h, REAL *w, REAL *biases, REAL *h2h_dest, R
 /*-------------------------------end--MMMul--Feedforward------------------------*/
 
 /*-------------------------------MMul--Backpropagation--------------------------*/
-/* la matrice di destinazione è width_h2h x width_delta     */
-/* h2h_corner,delta_corner  sono in previsione di una "sliding grid" */
+/* 
+Si calcola una porzione della matrice delta_W,delta_bias e di delta_h2h(dest_delta) a livello di blocco. 
+La griglia è adagiata sulla matrice delta_W (di conseguenza anche su W che ha le stesse dimensioni e offset di delta_W) ed ogni
+blocco si occupa della sua porzione senza interferenza con altri blocchi della stessa. La posizione del blocco all'interno della griglia determina quale 
+colonne di larghezza BLOCK_SIDE considerare nelle matrici delta_h2h(del livello successivo), h2h(di quello corrente): la prima dipende da b_x 
+mentre la seconda da b_y(cosi come dest_delta che ha le stesse dimensioni di h2h). Tale offset è determinato all'invocazione di questo kernel.
+*/
 __device__ void MMMulDevPartialBack(REAL* h2h, REAL* w, REAL* delta, REAL* dest_delta, REAL* delta_weight_dest, REAL* delta_bias_dest, int width_h2h, int width_delta, int h2h_right_limit, int delta_right_limit, BOOL enable_bias, int layer, int STREAMSIZE){
   int t_x = threadIdx.x;
   int t_y = threadIdx.y;
@@ -794,7 +799,6 @@ __device__ void MMMulDevPartialBack(REAL* h2h, REAL* w, REAL* delta, REAL* dest_
   int h2h_corner = blockIdx.y*BLOCK_SIDE;
   int delta_corner = blockIdx.x*BLOCK_SIDE;
 
-  //__shared__ REAL temp_shifted_mul[BLOCK_SIDE][BLOCK_SIDE*BLOCK_SIDE];//può contenere diversi 0 nei casi sui bordi
   __shared__ REAL temp_sum_delta_h2h[BLOCK_SIDE*BLOCK_SIDE];
   __shared__ REAL block_h2h[BLOCK_SIDE*BLOCK_SIDE];
   __shared__ REAL block_w[BLOCK_SIDE*(BLOCK_SIDE)];
@@ -819,22 +823,17 @@ __device__ void MMMulDevPartialBack(REAL* h2h, REAL* w, REAL* delta, REAL* dest_
     REAL val = block_delta[t_y*BLOCK_SIDE+t_x];
     REAL temp=0.0f;
         
-		__syncthreads();
+    __syncthreads();
 		for(int i=0 ;i<BLOCK_SIDE;i++){
 			if(layer>0)
-        temp += block_delta[t_y*BLOCK_SIDE+i]*block_w[i*BLOCK_SIDE+t_x];//partial sum of product delta*W by trd[ty][tx]
-      //temp_shifted_mul[t_y][ t_x + i*BLOCK_SIDE ] =  val*block_h2h[t_y*BLOCK_SIDE+i];
+        temp += block_delta[t_y*BLOCK_SIDE+i]*block_w[i*BLOCK_SIDE+t_x];//product ROW-COLUMN delta*W by trd[ty][tx]
+      /*L'interferenza rimane nel calcolo del delta_h2h del livello corrente (dest_delta) tra blocchi adiacenti lungo la larghezza della griglia.*/
       atomicAdd(&temp_sum_delta_h2h[t_x+i*BLOCK_SIDE],etaC[0]*val*block_h2h[t_y*BLOCK_SIDE+i]);
     }    
 
     if(layer > 0 && t_y < pattern)
       atomicAdd(&dest_delta[t_y*width_h2h+ curr_patterns*width_h2h + t_x], temp*block_h2h[t_y*BLOCK_SIDE+t_x]*(1.0-block_h2h[t_y*BLOCK_SIDE+t_x]));//product 
-    /*
-    for(int j=t_x,index=0; index<BLOCK_SIDE;j+=BLOCK_SIDE, index++ ){
-			//if(t_y<pattern)
-				atomicAdd(&temp_sum_delta_h2h[j] , eta*temp_shifted_mul[t_y][j]);
-    }*/
-  
+   
     if(enable_bias==1)//solo i blocchi con blocky = 0
       bias_to_update[t_y*BLOCK_SIDE + t_x] += block_delta[t_y*BLOCK_SIDE + t_x];
   }
@@ -850,18 +849,11 @@ __device__ void MMMulDevPartialBack(REAL* h2h, REAL* w, REAL* delta, REAL* dest_
   } 
 }
 
-/* si può fare la riduzione finale di W sommando i delta calcolati da ogni stream.
- oppure si fa prima ma bisogna salvarlo a parte e non sovrascrivere subito la matrice di partenza (problemi di concorrenza con altri stream) 
- la matrice di desinazione avrà streams*L*(L+1) elementi . si effettua la riduzione sullo stream principale per salvarla su quella giusta
- */
 
-
-/* THR_DEST has nupl[L]*nupl[l+1] element*/
-
-
-
+/* si effettua la riduzione finale di DELTA_W sommando i delta_w calcolati in ogni stream.
+  ogni thread del blocco lavora in modo indipendente dagli altri caricando solo le celle  che gli competono per poi aggiornare 
+  DELTA_WEIGHT,DELTA_BIAS,W e BIAS  */
 __device__ void MMMulReductionBlock(REAL* W, REAL* BIAS, REAL* DELTA_WEIGHT, REAL* DELTA_BIAS, REAL* DELTA_WEIGHT_DEST, REAL* DELTA_BIAS_DEST, int offset_weight, int offset_bias, int width_h2h, int width_delta,  int Y_right_limit, int X_right_limit, BOOL enable_bias, int NSTREAMS){
-  //__device__ void MMMulReductionBlock(REAL* W, REAL* BIAS, REAL* DELTA_WEIGHT, REAL* DELTA_BIAS, REAL* DELTA_WEIGHT_DEST, REAL* DELTA_BIAS_DEST, int offset_weight, int offset_bias, int width_h2h, int width_delta,  int Y_right_limit, int X_right_limit, BOOL enable_bias, int NSTREAMS){   
     
     int t_x = threadIdx.x;
     int t_y = threadIdx.y;
@@ -879,20 +871,20 @@ __device__ void MMMulReductionBlock(REAL* W, REAL* BIAS, REAL* DELTA_WEIGHT, REA
             dw_loc += DELTA_WEIGHT_DEST[i*width_delta*width_h2h+ offset_weight + offset_block_w + t_x + t_y*width_delta];//offset della griglia + offset blocco + offset thr
             if(enable_bias==1 && t_y==0){
                 dbias_loc += DELTA_BIAS_DEST[i*width_delta+ offset_bias + offset_block_bias + t_x];
-                //printf("enable_bias [%d][%d]< %d >-- local %f, stream %d, get by stream %f\n",b_y+t_y,b_x+t_x,enable_bias, dbias_loc, i,DELTA_BIAS_DEST[i*width_delta+ offset_bias + offset_block_bias + t_x]);
             }
         }
         if(enable_bias==1 && t_y==0){
-            //printf("enable_bias [%d][%d] -- DELTA BIAS:%f    local %f,  %f\n",b_y+t_y,b_x+t_x, DELTA_BIAS[t_x]+dbias_loc ,dbias_loc, alpha*DELTA_BIAS[t_x]);
             BIAS[t_x] += dbias_loc + alphaC[0]*DELTA_BIAS[t_x];
             DELTA_BIAS[t_x] = dbias_loc + alphaC[0]*DELTA_BIAS[t_x];
         }
         W[t_x + t_y*width_delta] += dw_loc;
         DELTA_WEIGHT[t_x + t_y*width_delta] = dw_loc;
-        //printf("enable_bias [%d][%d] -- DELTA WEIGHT:%f    local %f  %d-%d\n",b_y+t_y,b_x+t_x, DELTA_WEIGHT[t_x + t_y*width_delta],dw_loc,Y_right_limit,X_right_limit);
     }
 }
-
+/* se il blocco è entro i limiti della matrice deltaW può effetuare la riduzione della parte di deltaW che gli compete 
+ Le matrici DELTA_WEIGHT e DELTA_BIAS sono le matrici presenti nell'epoca precedente che devono essere aggiornate, così come W e BIAS,
+ riducendo prima le matrici "temporanee" DELTA_WEIGHT_DEST e DELTA_BIAS_DEST
+*/
 __global__ void MMMulReduction(REAL* W, REAL* BIAS, REAL* DELTA_WEIGHT, REAL* DELTA_BIAS, REAL* DELTA_WEIGHT_DEST, REAL* DELTA_BIAS_DEST, int offset_weight, int offset_bias, int width_h2h, int width_delta,  int Y_right_limit, int X_right_limit, BOOL enable_bias, int NSTREAMS){
     int b_x = blockIdx.x*BLOCK_SIDE;
     int b_y = blockIdx.y*BLOCK_SIDE;
@@ -901,6 +893,10 @@ __global__ void MMMulReduction(REAL* W, REAL* BIAS, REAL* DELTA_WEIGHT, REAL* DE
       MMMulReductionBlock(W+b_x+b_y*width_delta, BIAS+ b_x, DELTA_WEIGHT+b_x+b_y*width_delta, DELTA_BIAS+ b_x, DELTA_WEIGHT_DEST, DELTA_BIAS_DEST, offset_weight, offset_bias, width_h2h, width_delta,  Y_right_limit, X_right_limit, enable_bias*(1-blockIdx.y),NSTREAMS);
     //__syncthreads();
 }
+/* se il blocco è entro i limiti della matrice deltaW può calcolare la parte di deltaW che gli compete
+Le matrici DELTA_WEIGHT_DEST e DELTA_BIAS_DEST sono delle matrici "temporanee" di dimensione pari a NSTREAMS * la dimensione di DELTA_W e DELTA_BIAS.
+Ad ogni stream viene associata la porzione corrispondente di tali matrici alla chiamata del kernel di dimensione pari a DELTA_W (e DELTA_Bias)
+*/
 __global__ void MMMulDevBack(REAL* H2H, REAL* W, REAL* DELTA, REAL* DEST_DELTA, REAL* DELTA_WEIGHT_DEST, REAL* DELTA_BIAS_DEST, int width_h2h, int width_delta, int h2h_right_limit, int delta_right_limit, BOOL enable_bias,int layer, int STREAMSIZE){
     int b_x = blockIdx.x*BLOCK_SIDE;
     int b_y = blockIdx.y*BLOCK_SIDE;
@@ -928,16 +924,13 @@ void feedforward (REAL *INPUT,
 	//Useful pointers
 	REAL *h2h, *w, *bias, *h2h_dest, *delta, *error;
 
-	//offset
 	int offset,strsz= STREAMSIZE;
-
+  /* solo nella prima epoca si effettua la copia dei dati delle matrici W,DeltaW,Bias,DeltaBias*/
 	if (first_epoch == 1) {
 		HANDLE_CUDA(cudaMemcpy(WeightH2H, H_WeightH2H, GLOBAL_W_SIZE * sizeof(REAL), cudaMemcpyHostToDevice));
 		HANDLE_CUDA(cudaMemcpy(BiasH2H, H_BiasH2H, GLOBAL_BIAS_SIZE * sizeof(REAL), cudaMemcpyHostToDevice));
 		HANDLE_CUDA(cudaMemcpy(DeltaWeightH2H, H_DeltaWeightH2H, GLOBAL_W_SIZE * sizeof(REAL), cudaMemcpyHostToDevice));
 		HANDLE_CUDA(cudaMemcpy(DeltaBiasH2H, H_DeltaBiasH2H, GLOBAL_BIAS_SIZE * sizeof(REAL), cudaMemcpyHostToDevice));
-
-
 	}
 
 	for (int i = 0; i < NSTREAMS; i++) {
@@ -947,16 +940,18 @@ void feedforward (REAL *INPUT,
 		grid.x = (nupl[1] + block.x - 1) / block.x;
 		grid.y = gs.grid[0] / grid.x;
 
+    /*ogni stream ha il suo offset, ma non è detto che il numero di patterns sia divisibile per il numero di stream;
+     quindi l'ultimo potrebbe averne meno */
     offset = i*STREAMSIZE;
     strsz += (i==2)?NumPattern%(NSTREAMS*STREAMSIZE):0;
-		//Set pointers
-		h2h = H2H + offset*nupl[0];
+
+    /* si settano i puntatori del layer corrente*/
+    h2h = H2H + offset*nupl[0];
 		w = WeightH2H;
 		bias = BiasH2H;
 		h2h_dest = H2H + H_matrix_H2H_index[1] + offset*nupl[1];
 		delta = Delta + H_matrix_DELTA_index[layers - 2] + offset*nupl[layers - 1];
 		error = dev_error_mat + offset*nupl[layers - 1];
-		//Pointers set up
    
 		if (first_epoch == 1) {
 			HANDLE_CUDA(cudaMemcpyAsync(h2h, INPUT + offset*nupl[0], nupl[0] * STREAMSIZE * sizeof(REAL), cudaMemcpyHostToDevice, streams[i]));
@@ -969,15 +964,14 @@ void feedforward (REAL *INPUT,
 			block.x = gs.block[l];
 			block.y = gs.block[l];
 			grid.x = (nupl[l + 1] + block.x - 1) / block.x;
-			grid.y = gs.grid[l] / grid.x;
-
-			//Set pointers
+      grid.y = gs.grid[l] / grid.x;
+      
+			/* si settano i puntatori del layer corrente*/
 			h2h = H2H + H_matrix_H2H_index[l] + offset*nupl[l];
 			w = WeightH2H + H_matrix_W_index[l];
 			bias = BiasH2H + H_matrix_B_index[l];
 			h2h_dest = H2H + H_matrix_H2H_index[l + 1] + offset*nupl[l + 1];
 			//Delta and error already set up
-			//Pointers set up
 
 			MMMulDevFeed << <grid, block, 0, streams[i] >> > (h2h, w, bias, h2h_dest, delta, error, nupl[l], nupl[l + 1], offset, STREAMSIZE, nupl[layers-1]);
 		}
@@ -986,32 +980,37 @@ void feedforward (REAL *INPUT,
 	deviceReduceBlockAtomicKernel << <OPTIMUM_BLOCK_NUM * 2, BLOCK_SIDE*BLOCK_SIDE >> > (dev_error_mat, dev_error, NumPattern*nupl[layers-1]);
 }
 
-/*	 BACKPROPAGATION	*/
+/*	SECONDA FASE DELL'ALGORITMO : L'ERRORE E' PROPAGATO A RITROSO LUNGO LA RETE */
 void backpropagation(REAL* H_WeightH2H, REAL* H_BiasH2H, REAL* H_DeltaWeightH2H, REAL* H_DeltaBiasH2H, REAL* H_Delta, REAL* H_H2H, int* H_matrix_W_index, int * H_matrix_B_index,int* H_matrix_DELTA_index, int* H_matrix_H2H_index,
 	REAL* WeightH2H, REAL* BiasH2H, REAL* DeltaWeightH2H, REAL* DeltaBiasH2H, REAL* Delta,REAL* H2H,REAL* TempDeltaWeightH2H, REAL* TempDeltaBiasH2H, 
 	int* nupl , int layers, cudaStream_t* streams,int GLOBAL_BIAS_SIZE , int GLOBAL_W_SIZE, int GLOBAL_DELTA_SIZE, int NSTREAMS, int STREAMSIZE, int NumPattern){
-    dim3 grid,block;
-    block.x= BLOCK_SIDE;
-    block.y= BLOCK_SIDE;
+    
+  dim3 grid,block;
+  block.x= BLOCK_SIDE;
+  block.y= BLOCK_SIDE;
 
 	REAL *d_h2h, *d_w, *d_bias, *d_delta_weight, *d_delta_bias, *d_delta, *d_dest_delta, *d_delta_weight_dest, *d_delta_bias_dest;
-	
-	int offset,strsz=STREAMSIZE;
+  /*ogni stream ha il suo offset, ma non è detto che il numero di patterns sia divisibile per il numero di stream;
+  quindi l'ultimo potrebbe averne meno */
+  int offset,strsz=STREAMSIZE;
+
+  /*  BACKPROPAGATION (SU PIU' STREAM) */
 	for(int str=0;str<NSTREAMS;str++){
 		offset=str*STREAMSIZE;
     strsz += (str==2)?NumPattern%(NSTREAMS*STREAMSIZE):0;
-    //printf("strsz %d\n",strsz);
 
 		for (int l = (layers -2); l > 0; l--) {
+      /*  si imposta la griglia in modo da "coprire" la matrice deltaW su cui si adagia*/
 			optimum_grid_x(&grid, OPTIMUM_BLOCK_NUM, nupl[l]/BLOCK_SIDE, nupl[l + 1]);
-			//Set pointers
+			/* si settano i puntatori del layer corrente*/
 			d_h2h = H2H + H_matrix_H2H_index[l] + offset*nupl[l];
 			d_w = WeightH2H + H_matrix_W_index[l];
 			d_delta_weight_dest = TempDeltaWeightH2H + NSTREAMS*H_matrix_W_index[l];
 			d_delta_bias_dest = TempDeltaBiasH2H + NSTREAMS*H_matrix_B_index[l];
 			d_delta = Delta + H_matrix_DELTA_index[l] + offset*nupl[l+1];
 			d_dest_delta = Delta + H_matrix_DELTA_index[l-1] + offset*nupl[l];
-			
+      
+      /* la dimensione della griglia è fissata, per tanto bisogna "spostarla" lungo la matrice deltaW */
 			for(int sw_x=0; sw_x < nupl[l+1]; sw_x += grid.x*BLOCK_SIDE){
 				for(int sw_y=0; sw_y < nupl[l]; sw_y += grid.y*BLOCK_SIDE) {
 					MMMulDevBack<<< grid,block,0,streams[str]>>>(d_h2h +sw_y, d_w +sw_x+sw_y*nupl[l+1], d_delta +sw_x, d_dest_delta + sw_y, d_delta_weight_dest + str*nupl[l]*nupl[l+1] +sw_x+sw_y*nupl[l+1], d_delta_bias_dest+ str*nupl[l+1] +sw_x, nupl[l], nupl[l+1], min(nupl[l]-sw_y,grid.y*BLOCK_SIDE) ,min(nupl[l+1]-sw_x,grid.x*BLOCK_SIDE),(1-sw_y),l, strsz);
@@ -1031,8 +1030,9 @@ void backpropagation(REAL* H_WeightH2H, REAL* H_BiasH2H, REAL* H_DeltaWeightH2H,
 				MMMulDevBack<<< grid,block,0,streams[str]>>>(d_h2h +sw_y, d_w +sw_x+sw_y*nupl[1], d_delta +sw_x, NULL, d_delta_weight_dest + str*nupl[0]*nupl[1] +sw_x+sw_y*nupl[1], d_delta_bias_dest+ str*nupl[1] +sw_x, nupl[0], nupl[1], min(nupl[0]-sw_y,grid.y*BLOCK_SIDE) ,min(nupl[1]-sw_x,grid.x*BLOCK_SIDE),(1-sw_y),0, strsz);
 			}
 		}
-	}
-	/* REDUCTION */
+  }
+  /*  end BACKPROPAGATION */
+	/* REDUCTION (SOLO UNO STREAM)*/
 	for (int l = (layers -2); l >= 0; l--) {
 		optimum_grid_x(&grid, OPTIMUM_BLOCK_NUM, nupl[l]/BLOCK_SIDE, nupl[l + 1]);
 
@@ -1041,12 +1041,15 @@ void backpropagation(REAL* H_WeightH2H, REAL* H_BiasH2H, REAL* H_DeltaWeightH2H,
 		d_delta_weight = DeltaWeightH2H + H_matrix_W_index[l];
 		d_delta_bias = DeltaBiasH2H + H_matrix_B_index[l];
 		d_delta_weight_dest = TempDeltaWeightH2H + NSTREAMS*H_matrix_W_index[l];
-		d_delta_bias_dest = TempDeltaBiasH2H + NSTREAMS*H_matrix_B_index[l];
-
+    d_delta_bias_dest = TempDeltaBiasH2H + NSTREAMS*H_matrix_B_index[l];
+    
+    /* la dimensione della griglia è fissata, per tanto bisogna "spostarla" lungo la matrice deltaW */
 		for(int sw_x=0; sw_x < nupl[l+1]; sw_x += grid.x*BLOCK_SIDE){
 			for(int sw_y=0; sw_y < nupl[l];sw_y += grid.y*BLOCK_SIDE) {
 				MMMulReduction<<<grid,block>>>(d_w +sw_x+sw_y*nupl[l+1], d_bias+ sw_x, d_delta_weight +sw_x+sw_y*nupl[l+1], d_delta_bias +sw_x , d_delta_weight_dest, d_delta_bias_dest, sw_x+sw_y*nupl[l+1], sw_x,  nupl[l], nupl[l+1], min(nupl[l]-sw_y,grid.y*BLOCK_SIDE) ,min(nupl[l+1]-sw_x,grid.x*BLOCK_SIDE),(1-sw_y),NSTREAMS);
 			}
 		}
-	}
+  }
+  /* END REDUCTION */
+
 }
