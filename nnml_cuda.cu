@@ -378,17 +378,11 @@ int main(int argc, char *argv[]) {
 
   /*++++---------------------------REAL structures on host and device-------------------------++++*/
 	/*	HOST MATRIX AND INDEXES FOR PADDING */
-    //H_WeightH2H = (REAL*)malloc(GLOBAL_W_SIZE*sizeof(REAL));
     H_WeightH2H = (REAL*)makevect(GLOBAL_W_SIZE,sizeof(REAL));
-    //H_BiasH2H = (REAL*)malloc(GLOBAL_BIAS_SIZE*sizeof(REAL));
     H_BiasH2H = (REAL*)makevect(GLOBAL_BIAS_SIZE,sizeof(REAL));
-    //H_DeltaWeightH2H = (REAL*)calloc(GLOBAL_W_SIZE,sizeof(REAL));
     H_DeltaWeightH2H = (REAL*)makevect(GLOBAL_W_SIZE,sizeof(REAL));
-    //H_DeltaBiasH2H = (REAL*)calloc(GLOBAL_BIAS_SIZE*sizeof(REAL));
     H_DeltaBiasH2H = (REAL*)makevect(GLOBAL_BIAS_SIZE,sizeof(REAL));
-    //H_Delta = (REAL*)malloc(GLOBAL_DELTA_SIZE*sizeof(REAL));
     H_Delta = (REAL*)makevect(GLOBAL_DELTA_SIZE,sizeof(REAL));
-    //H_H2H = (REAL*)malloc(GLOBAL_H_SIZE*sizeof(REAL));
     H_H2H = (REAL*)makevect(GLOBAL_H_SIZE,sizeof(REAL));
 
     int H_matrix_W_index[TOTAL_LAYER - 1];//INDEX for padding in Weight 
@@ -677,8 +671,8 @@ __global__ void deviceReduceBlockAtomicKernel(REAL *in, REAL* out, int N) {
 /* h2h è il puntatore alla porzione dell'h2h globale da considerare in questa fase
 (ad ogni passo il kernel che invoca questo device incrementa il puntatore h2h
 in modo proporzionale al patt_per_step (e similmente h2h_dest) (vedi sotto)).
-offset_y � la posizione considerata lungo le y (nelle matrici h2h, h2h_dest ed eventualmente error) durante la chiamata corrente a __device__.
-Delta � calcolato per l'output layer (propagato poi con backpropagation) --> DeltaO[p][k] = (Target[p][k] - Output[p][k]) * Output[p][k] * (1.0 - Output[p][k]) ;
+offset_y è la posizione considerata lungo le y (nelle matrici h2h, h2h_dest ed eventualmente error) durante la chiamata corrente a __device__.
+Delta è calcolato per l'output layer (propagato poi con backpropagation) --> DeltaO[p][k] = (Target[p][k] - Output[p][k]) * Output[p][k] * (1.0 - Output[p][k]) ;
 */
 
 __device__ void MMMulDevPartialFeed(REAL *h2h, REAL *w, REAL *biases, REAL *h2h_dest, REAL *delta, REAL *error, unsigned int row_w, unsigned int col_w, unsigned int num_pattern, unsigned int offset_y, int NumOutput) {
@@ -713,7 +707,6 @@ __device__ void MMMulDevPartialFeed(REAL *h2h, REAL *w, REAL *biases, REAL *h2h_
 		int t_index_w = wid + tx + ty*col_w;
 		int t_index_h2h = h2h_id + tx + ty*row_w;
 
-		//Attenzione alla divergenza dei threads (vedi CCC pag.137)
 		shared_h2h[ty][tx] = (t_index_h2h < num_pattern*row_w) ? (h2h[t_index_h2h]) : (0.0f);
 		shared_w[ty][tx] = (t_index_w < col_w*row_w) ? (w[t_index_w]) : (0.0f);
 
@@ -731,7 +724,6 @@ __device__ void MMMulDevPartialFeed(REAL *h2h, REAL *w, REAL *biases, REAL *h2h_
 		__syncthreads();
 	}
 
-	//Attenzione alla divergenza dei threads (vedi CCC pag.137)
 	if (dest_x < col_w && dest_y < num_pattern) {
 
 		REAL out = 1.0 / (1.0 + exp(-(partial + biases[dest_x])));
@@ -753,11 +745,11 @@ __device__ void MMMulDevPartialFeed(REAL *h2h, REAL *w, REAL *biases, REAL *h2h_
 	}
 }
 
-/*patt_per_step � il numero di pattern (quando possibile...) da considerare in ciascuna iterazione su h2h*/
+/*patt_per_step è il numero di pattern (quando possibile...) da considerare in ciascuna iterazione su h2h*/
 /*Questo kernel ad ogni passo incrementa il puntatore ad h2h di num_patt_per_step*NEURO_L_L_1 (e similmente h2h_dest),
 controlla che sia ancora nel range di h2h, e calcola num_pattern (vedi sopra) in funzione dei
 pattern mancanti.
-stream_offset_y � la posizione lungo le y da cui parte (nelle matrici h2h e h2h_dest) lo stream corrente.
+stream_offset_y è la posizione lungo le y da cui parte (nelle matrici h2h e h2h_dest) lo stream corrente.
 */
 //Dove ora c'� STREAMSIZE prima c'era NumPattern
 __global__ void MMMulDevFeed(REAL *h2h, REAL *w, REAL *biases, REAL *h2h_dest, REAL *delta, REAL *error, unsigned int row_w, unsigned int col_w, unsigned int stream_offset_y,
@@ -799,7 +791,7 @@ __device__ void MMMulDevPartialBack(REAL* h2h, REAL* w, REAL* delta, REAL* dest_
   int h2h_corner = blockIdx.y*BLOCK_SIDE;
   int delta_corner = blockIdx.x*BLOCK_SIDE;
 
-  __shared__ REAL temp_sum_delta_h2h[BLOCK_SIDE*BLOCK_SIDE];
+  //__shared__ REAL temp_sum_delta_h2h[BLOCK_SIDE*BLOCK_SIDE];
   __shared__ REAL block_h2h[BLOCK_SIDE*BLOCK_SIDE];
   __shared__ REAL block_w[BLOCK_SIDE*(BLOCK_SIDE)];
   __shared__ REAL block_delta[BLOCK_SIDE*BLOCK_SIDE];
@@ -810,7 +802,7 @@ __device__ void MMMulDevPartialBack(REAL* h2h, REAL* w, REAL* delta, REAL* dest_
   REAL thr_deltaW[BLOCK_SIDE];
   for(int j =0 ;j<BLOCK_SIDE;j++)
     thr_deltaW[j]=0.0;
-  temp_sum_delta_h2h[t_x+t_y*BLOCK_SIDE]=0.0f;
+  //temp_sum_delta_h2h[t_x+t_y*BLOCK_SIDE]=0.0f;
   //trasposta di W caricata una sola volta 
 	if(layer>0)
 	  block_w[t_x*BLOCK_SIDE+t_y] = (max_a_x > t_y && max_b_x > t_x) ? w[t_y*width_delta + t_x]:0.0f;
@@ -831,8 +823,11 @@ __device__ void MMMulDevPartialBack(REAL* h2h, REAL* w, REAL* delta, REAL* dest_
 			if(layer>0)
         temp += block_delta[t_y*BLOCK_SIDE+i]*block_w[i*BLOCK_SIDE+t_x];//product ROW-COLUMN delta*W by trd[ty][tx]
       thr_deltaW[i]+=val*block_h2h[t_y*BLOCK_SIDE+i];
-      //atomicAdd(&temp_sum_delta_h2h[t_x+i*BLOCK_SIDE],val*block_h2h[t_y*BLOCK_SIDE+i]);
-      /*ogni thread del blocco contribuisce a deltaW (i thread con stesso t_x contribuiscono allo stesso elemento) */
+      /*ogni thread si costruisce una porzione di deltaW salvandola in un array locale(la riduzione di tale  )*/
+      
+      /*ogni thread del blocco contribuisce a deltaW (i thread con stesso t_x contribuiscono allo stesso elemento)
+          atomicAdd(&temp_sum_delta_h2h[t_x+i*BLOCK_SIDE],val*block_h2h[t_y*BLOCK_SIDE+i]); 
+          */
     }    
       
     /*L'interferenza rimane nel calcolo del delta_h2h del livello corrente (dest_delta) tra blocchi adiacenti lungo la larghezza della griglia.*/
@@ -843,14 +838,17 @@ __device__ void MMMulDevPartialBack(REAL* h2h, REAL* w, REAL* delta, REAL* dest_
       bias_to_update[t_y*BLOCK_SIDE + t_x] += block_delta[t_y*BLOCK_SIDE + t_x];
   }
   /*si aggiorna deltaW dello stream*/
-  for(int i=0;i<BLOCK_SIDE;i++)
+  /*for(int i=0;i<BLOCK_SIDE;i++)
     atomicAdd(&temp_sum_delta_h2h[t_x+i*BLOCK_SIDE],thr_deltaW[i]);
-  __syncthreads();
-  if( (t_y + h2h_corner) < h2h_right_limit && (t_x + delta_corner) < delta_right_limit){
-    delta_weight_dest[t_x+t_y*width_delta] = etaC[0]*temp_sum_delta_h2h[t_y*BLOCK_SIDE+ t_x];
+  __syncthreads();*/
+  for(int i=0;i<BLOCK_SIDE;i++){
+    if( (i + h2h_corner) < h2h_right_limit && (t_x + delta_corner) < delta_right_limit){
+    //if( (t_y + h2h_corner) < h2h_right_limit && (t_x + delta_corner) < delta_right_limit){
+      //delta_weight_dest[t_x+t_y*width_delta] = etaC[0]*temp_sum_delta_h2h[t_y*BLOCK_SIDE+ t_x];
+      atomicAdd(&delta_weight_dest[t_x+i*width_delta],etaC[0]*thr_deltaW[i]);
+    }
   }
-  
-
+  /* si aggiorna deltaBias dello stream */
   if(enable_bias==1 &&  t_y==0 && (t_x + delta_corner) < delta_right_limit){
     REAL tempBias=0.0f;
     for(int i=0;i<BLOCK_SIDE;i++)
