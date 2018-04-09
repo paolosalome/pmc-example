@@ -807,10 +807,13 @@ __device__ void MMMulDevPartialBack(REAL* h2h, REAL* w, REAL* delta, REAL* dest_
 
   int max_b_x = ((delta_corner + BLOCK_SIDE) < delta_right_limit) ? BLOCK_SIDE: (delta_right_limit - delta_corner);
   int max_a_x = ((h2h_corner + BLOCK_SIDE) < h2h_right_limit) ? BLOCK_SIDE: (h2h_right_limit - h2h_corner);
-
+  REAL thr_deltaW[BLOCK_SIDE];
+  for(int j =0 ;j<BLOCK_SIDE;j++)
+    thr_deltaW[j]=0.0;
   temp_sum_delta_h2h[t_x+t_y*BLOCK_SIDE]=0.0f;
+  //trasposta di W caricata una sola volta 
 	if(layer>0)
-	  block_w[t_x*BLOCK_SIDE+t_y] = (max_a_x > t_y && max_b_x > t_x) ? w[t_y*width_delta + t_x]:0.0f;//trasposta
+	  block_w[t_x*BLOCK_SIDE+t_y] = (max_a_x > t_y && max_b_x > t_x) ? w[t_y*width_delta + t_x]:0.0f;
 
   if(enable_bias==1)
     bias_to_update[t_y*BLOCK_SIDE + t_x] = 0.0f;
@@ -827,19 +830,26 @@ __device__ void MMMulDevPartialBack(REAL* h2h, REAL* w, REAL* delta, REAL* dest_
 		for(int i=0 ;i<BLOCK_SIDE;i++){
 			if(layer>0)
         temp += block_delta[t_y*BLOCK_SIDE+i]*block_w[i*BLOCK_SIDE+t_x];//product ROW-COLUMN delta*W by trd[ty][tx]
-      /*L'interferenza rimane nel calcolo del delta_h2h del livello corrente (dest_delta) tra blocchi adiacenti lungo la larghezza della griglia.*/
-      atomicAdd(&temp_sum_delta_h2h[t_x+i*BLOCK_SIDE],etaC[0]*val*block_h2h[t_y*BLOCK_SIDE+i]);
+      thr_deltaW[i]+=val*block_h2h[t_y*BLOCK_SIDE+i];
+      //atomicAdd(&temp_sum_delta_h2h[t_x+i*BLOCK_SIDE],val*block_h2h[t_y*BLOCK_SIDE+i]);
+      /*ogni thread del blocco contribuisce a deltaW (i thread con stesso t_x contribuiscono allo stesso elemento) */
     }    
-
+      
+    /*L'interferenza rimane nel calcolo del delta_h2h del livello corrente (dest_delta) tra blocchi adiacenti lungo la larghezza della griglia.*/
     if(layer > 0 && t_y < pattern)
       atomicAdd(&dest_delta[t_y*width_h2h+ curr_patterns*width_h2h + t_x], temp*block_h2h[t_y*BLOCK_SIDE+t_x]*(1.0-block_h2h[t_y*BLOCK_SIDE+t_x]));//product 
    
     if(enable_bias==1)//solo i blocchi con blocky = 0
       bias_to_update[t_y*BLOCK_SIDE + t_x] += block_delta[t_y*BLOCK_SIDE + t_x];
   }
+  /*si aggiorna deltaW dello stream*/
+  for(int i=0;i<BLOCK_SIDE;i++)
+    atomicAdd(&temp_sum_delta_h2h[t_x+i*BLOCK_SIDE],thr_deltaW[i]);
+  __syncthreads();
   if( (t_y + h2h_corner) < h2h_right_limit && (t_x + delta_corner) < delta_right_limit){
-    delta_weight_dest[t_x+t_y*width_delta] = temp_sum_delta_h2h[t_y*BLOCK_SIDE+ t_x];
+    delta_weight_dest[t_x+t_y*width_delta] = etaC[0]*temp_sum_delta_h2h[t_y*BLOCK_SIDE+ t_x];
   }
+  
 
   if(enable_bias==1 &&  t_y==0 && (t_x + delta_corner) < delta_right_limit){
     REAL tempBias=0.0f;
