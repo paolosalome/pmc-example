@@ -18,7 +18,7 @@ __device__ int ssb_warp_prefix_sum(int val,int*warpReduction) {
     int wid = threadIdx.x/WARPSIZE;
 
     int temp_val,old_val;
-   
+   /* UP_SWEEP */
     for (int offset = 2; offset <=WARPSIZE ; offset *= 2){
         temp_val=val;
         temp_val=((lane+1-offset/2)>=0)?__shfl_up(temp_val, offset/2):0;
@@ -28,7 +28,7 @@ __device__ int ssb_warp_prefix_sum(int val,int*warpReduction) {
         *warpReduction=val;
          val=0;
     }
-
+    /* DOWN-SWEEP */
     for (int offset = WARPSIZE; offset >1 ; offset /= 2){// x[k+2​^(d+1)​–1]=x[k+2^​d​–1]+x[k+ 2​^(d+​1)–1] 
 
         temp_val=val;
@@ -73,33 +73,28 @@ __global__ void ssb_prefix_sum(int* in,int* out,int N){
     do{ 
         lastLane= min(DEFAULTBLOCKSIZE,N-j);
         valIn=in[t_x+j];//((t_x+j)<N)?in[t_x+j]:0;
+        /*  in block prefix[i] sono presenti la somma di tutti gli elementi del warp i
+            questo valore è ricavato dall'ultimo thread del warp nella fase di prefix Sum   */
         val = ssb_warp_prefix_sum(valIn,&block_prefix[wid]);   
 
         __syncthreads();
-
-        if(wid==0){//reduction of prefix made by one warp
+        /*  effettuando una riduzione in un warp troviamo in posizione [i] la somma di tutti gli elementi
+            del warp [i] e di quelli prima        */
+        if(wid==0){
             int temporal= (lane< shared_dim)?block_prefix[lane]:0;
             temporal= warp_reduction(temporal);
             if(lane< shared_dim)
                 block_prefix[lane] = temporal ;
-            
-       //     printf("warp 0 [%d] prefix:%d \n",lane,block_prefix[lane]);
-
         }
+        /* si scrive in memoria globale tenendo conto dell'offset cumulato e l'ultimo thread 
+           del blocco con indice valido aggiorna il valore di first utile al prossimo turno */
         __syncthreads();
         if(t_x < lastLane)
             out[t_x+j]=(wid==0)?val+first:val+block_prefix[wid-1]+first;
-        __syncthreads();
+        //__syncthreads();
         if(t_x == (lastLane - 1)){
-           // printf("LAST LANE %d of warp[%d] prefix:%d \n",lane,wid,block_prefix[wid]);
-            first+= block_prefix[wid];//val; 
+            first+= block_prefix[wid];
         }
- 
-     /*    if(lane==0){
-            printf("\n-----\n");
-            printf("warp prefix wid[%d]:%d, in:%d--%d\n",wid,block_prefix[wid],valIn,first);
-        }
-           */  
         __syncthreads();
         j+=blockDim.x;
 
